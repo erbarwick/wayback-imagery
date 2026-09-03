@@ -11,10 +11,14 @@ from wayback_imagery.core import (
     _parse_capture_date,
     bbox_from_segment,
     build_filename,
+    choose_corridor_zoom,
     choose_zoom,
+    corridor_geometry,
+    corridor_point,
     distinct_captures,
     find_release,
     lonlat_to_pixel,
+    pixel_to_lonlat,
     slugify,
     validate_bbox,
 )
@@ -37,6 +41,12 @@ def test_pixel_origin_is_top_left():
 def test_pixel_center_of_world():
     x, y = lonlat_to_pixel(0, 0, 1)
     assert (round(x), round(y)) == (256, 256)
+
+
+def test_pixel_lonlat_roundtrip():
+    x, y = lonlat_to_pixel(-121.67, 38.55, 15)
+    lon, lat = pixel_to_lonlat(x, y, 15)
+    assert abs(lon + 121.67) < 1e-9 and abs(lat - 38.55) < 1e-9
 
 
 def test_choose_zoom_smaller_area_gets_higher_zoom():
@@ -66,6 +76,41 @@ def test_validate_bbox_rejects_inverted():
 def test_validate_bbox_clamps_latitude():
     _, s, _, n = validate_bbox((-10, -89, 10, 89))
     assert s > -86 and n < 86
+
+
+# --- aligned corridor ------------------------------------------------------
+
+def test_corridor_east_west_segment():
+    g = corridor_geometry((38.55, -121.68), (38.55, -121.66), half_width_m=20, pad_m=0)
+    assert abs(g.theta) < 1e-9 and abs(g.bearing - 90) < 1e-6
+    w, s, e, n = g.envelope
+    # With no padding the envelope ends are the endpoints themselves (up to rounding).
+    assert w <= -121.68 + 1e-9 and e >= -121.66 - 1e-9 and s < 38.55 < n
+    # 20 m half-width is about 0.00018 deg of latitude
+    assert 0.0003 < (n - s) < 0.0005
+
+
+def test_corridor_envelope_contains_endpoints():
+    g = corridor_geometry((38.5565, -121.6766), (38.5589, -121.6702))
+    w, s, e, n = g.envelope
+    for lat, lon in ((38.5565, -121.6766), (38.5589, -121.6702)):
+        assert w <= lon <= e and s <= lat <= n
+
+
+def test_corridor_identical_points_rejected():
+    with pytest.raises(ValueError):
+        corridor_geometry((38.55, -121.67), (38.55, -121.67))
+
+
+def test_corridor_point_maps_start_left_end_right():
+    start, end = (38.5565, -121.6766), (38.5589, -121.6702)
+    g = corridor_geometry(start, end, half_width_m=20, pad_m=30)
+    zoom = choose_corridor_zoom(g)
+    width, height = round(2 * g.a * 2 ** zoom), round(2 * g.b * 2 ** zoom)
+    sx, sy = corridor_point(g, zoom, start, width, height)
+    ex, ey = corridor_point(g, zoom, end, width, height)
+    assert sx < width / 2 < ex
+    assert abs(sy - height / 2) < 1 and abs(ey - height / 2) < 1
 
 
 # --- release selection -----------------------------------------------------

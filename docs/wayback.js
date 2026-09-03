@@ -12,10 +12,10 @@
  */
 
 export const CONFIG_URL =
-  "https://s3-us-west-2.amazonaws.com/config.maptiles.arcgis.com/waybackconfig.json";
+    "https://s3-us-west-2.amazonaws.com/config.maptiles.arcgis.com/waybackconfig.json";
 export const DEFAULT_TILE_TEMPLATE =
-  "https://wayback.maptiles.arcgis.com/arcgis/rest/services/World_Imagery/" +
-  "WMTS/1.0.0/default028mm/MapServer/tile/{release}/{level}/{row}/{col}";
+    "https://wayback.maptiles.arcgis.com/arcgis/rest/services/World_Imagery/" +
+    "WMTS/1.0.0/default028mm/MapServer/tile/{release}/{level}/{row}/{col}";
 
 const TILE = 256;
 const MAX_TILES = 2500;
@@ -105,7 +105,7 @@ export async function findReleaseById(id) {
 
 export function tileUrl(release, z, x, y) {
   return release.tileTemplate
-    .replace("{release}", release.id).replace("{level}", z).replace("{row}", y).replace("{col}", x);
+      .replace("{release}", release.id).replace("{level}", z).replace("{row}", y).replace("{col}", x);
 }
 
 // Shared nearest/before/after selection. `items` must be sorted ascending by key.
@@ -155,7 +155,7 @@ async function metadataLayers(url) {
 function layersForZoom(layers, zoom) {
   const scale = scaleForZoom(zoom);
   const visible = layers.filter(l =>
-    (!l.minScale || scale <= l.minScale) && (!l.maxScale || scale >= l.maxScale));
+      (!l.minScale || scale <= l.minScale) && (!l.maxScale || scale >= l.maxScale));
   return visible.length ? visible : [...layers].sort((a, b) => (a.maxScale || 0) - (b.maxScale || 0));
 }
 
@@ -264,10 +264,9 @@ export function bboxFromSegment([lat1, lon1], [lat2, lon2], marginM = 150, margi
   const south = Math.min(lat1, lat2), north = Math.max(lat1, lat2);
   const midLat = (south + north) / 2;
   const mPerDegLat = 111320, mPerDegLon = 111320 * Math.cos(midLat * Math.PI / 180);
-  const widthM = (east - west) * mPerDegLon, heightM = (north - south) * mPerDegLat;
-  const margin = Math.max(marginM, marginFrac * Math.max(widthM, heightM));
-  return [west - margin / mPerDegLon, south - margin / mPerDegLat,
-          east + margin / mPerDegLon, north + margin / mPerDegLat];
+  const mx = Math.max(marginM, marginFrac * (east - west) * mPerDegLon);
+  const my = Math.max(marginM, marginFrac * (north - south) * mPerDegLat);
+  return [west - mx / mPerDegLon, south - my / mPerDegLat, east + mx / mPerDegLon, north + my / mPerDegLat];
 }
 
 export function validateBbox(bbox) {
@@ -288,6 +287,11 @@ export const bboxCenter = ([w, s, e, n]) => [(w + e) / 2, (s + n) / 2]; // [lon,
 export function lonlatToPixel(lon, lat, zoom) {
   const n = TILE * 2 ** zoom, r = lat * Math.PI / 180;
   return [(lon + 180) / 360 * n, (1 - Math.log(Math.tan(r) + 1 / Math.cos(r)) / Math.PI) / 2 * n];
+}
+
+export function pixelToLonlat(x, y, zoom) {
+  const n = TILE * 2 ** zoom;
+  return [x / n * 360 - 180, Math.atan(Math.sinh(Math.PI * (1 - 2 * y / n))) * 180 / Math.PI];
 }
 
 export function bboxPixelExtent([w, s, e, n], zoom) {
@@ -322,9 +326,6 @@ export async function stitch(bbox, release, zoom, onProgress) {
   const tx0 = Math.floor(x0 / TILE), ty0 = Math.floor(y0 / TILE);
   const tx1 = Math.ceil(x1 / TILE) - 1, ty1 = Math.ceil(y1 / TILE) - 1;
   const cols = tx1 - tx0 + 1, rows = ty1 - ty0 + 1;
-  if (cols * rows > MAX_TILES) {
-    throw new Error(`Request needs ${cols * rows} tiles (limit ${MAX_TILES}). Reduce area or zoom.`);
-  }
 
   const canvas = document.createElement("canvas");
   canvas.width = cols * TILE; canvas.height = rows * TILE;
@@ -332,7 +333,13 @@ export async function stitch(bbox, release, zoom, onProgress) {
   ctx.fillStyle = "#808080"; ctx.fillRect(0, 0, canvas.width, canvas.height);
 
   const tiles = [];
-  for (let ty = ty0; ty <= ty1; ty++) for (let tx = tx0; tx <= tx1; tx++) tiles.push([tx, ty]);
+  for (let ty = ty0; ty <= ty1; ty++) for (let tx = tx0; tx <= tx1; tx++) {
+    if (!keep || keep(tx, ty)) tiles.push([tx, ty]);
+  }
+  if (tiles.length > MAX_TILES) {
+    throw new Error(`Request needs ${tiles.length} tiles (limit ${MAX_TILES}). Reduce area or zoom.`);
+  }
+
   let missing = 0;
   await pool(tiles, 8, async ([tx, ty]) => {
     const img = await loadImage(tileUrl(release, zoom, tx, ty));
@@ -343,22 +350,29 @@ export async function stitch(bbox, release, zoom, onProgress) {
   const out = document.createElement("canvas");
   out.width = Math.max(1, Math.round(x1 - x0)); out.height = Math.max(1, Math.round(y1 - y0));
   out.getContext("2d").drawImage(canvas, -Math.round(x0 - tx0 * TILE), -Math.round(y0 - ty0 * TILE));
-  return { canvas: out, tilesTotal: tiles.length, tilesMissing: missing };
+  return {
+    canvas: out, tilesTotal: tiles.length, tilesMissing: missing,
+    origin: [tx0 * TILE + Math.round(x0 - tx0 * TILE), ty0 * TILE + Math.round(y0 - ty0 * TILE)],
+  };
 }
 
 // ---------------------------------------------------------------------------
 // Annotation
 // ---------------------------------------------------------------------------
 
-export function drawPoints(canvas, bbox, zoom, points, color = "rgb(255,40,40)") {
-  const { x0, y0 } = bboxPixelExtent(bbox, zoom);
-  const r = Math.max(5, Math.floor(canvas.width / 150));
+export function drawCircles(canvas, pts, color = "rgb(255,40,40)") {
+  const r = Math.max(5, Math.floor(Math.min(canvas.width, canvas.height * 3) / 150));
   const ctx = canvas.getContext("2d");
   ctx.strokeStyle = color; ctx.lineWidth = Math.max(2, Math.floor(r / 2));
-  for (const [lat, lon] of points) {
+  for (const [x, y] of pts) { ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.stroke(); }
+}
+
+export function drawPoints(canvas, bbox, zoom, points, color) {
+  const { x0, y0 } = bboxPixelExtent(bbox, zoom);
+  drawCircles(canvas, points.map(([lat, lon]) => {
     const [px, py] = lonlatToPixel(lon, lat, zoom);
-    ctx.beginPath(); ctx.arc(px - x0, py - y0, r, 0, Math.PI * 2); ctx.stroke();
-  }
+    return [px - x0, py - y0];
+  }), color);
 }
 
 export function addLabel(canvas, lines, padding = 8) {
@@ -389,10 +403,10 @@ export function slugify(text) {
   return String(text).replace(/[^A-Za-z0-9]+/g, "-").replace(/^-+|-+$/g, "").toLowerCase() || "imagery";
 }
 
-export function buildFilename(label, requested, release, captureDate, [w, s, e, n], zoom, ext = "png") {
+export function buildFilename(label, requested, release, captureDate, [w, s, e, n], zoom, suffix = "", ext = "png") {
   const f = v => v.toFixed(5);
   return `${slugify(label)}_req${requested}_cap${captureDate || "unknown"}` +
-    `_rel${release.date}-r${release.id}_bbox${f(w)}_${f(s)}_${f(e)}_${f(n)}_z${zoom}.${ext}`;
+      `_rel${release.date}-r${release.id}_bbox${f(w)}_${f(s)}_${f(e)}_${f(n)}_z${zoom}${suffix}.${ext}`;
 }
 
 export function downloadCanvas(canvas, filename) {
@@ -409,17 +423,194 @@ export function downloadCanvas(canvas, filename) {
 }
 
 // ---------------------------------------------------------------------------
+// Rotated rectangles: an aligned corridor around a road segment, or a
+// user-rotated bounding box. Both share the same geometry object:
+//   centre   [x, y]        centre in zoom-0 pixel units
+//   theta    radians       direction of the rectangle's local x axis, clockwise
+//                          from screen east (y grows south). This is the axis
+//                          that ends up horizontal in the output image.
+//   bearing  degrees       corridor: compass bearing of the segment (0 = north)
+//                          rotated:  the rotation angle (image top faces this bearing)
+//   a, b                   half-extents along the local x and y axes (zoom-0 units)
+//   corners  [[lon, lat]]  four corners
+//   envelope [w, s, e, n]  axis-aligned box containing the rectangle (what gets fetched)
+//   widthM, heightM        ground size of the rectangle in metres
+//   kind                   "corridor" | "rotated"
+// ---------------------------------------------------------------------------
+
+const EARTH_CIRCUMFERENCE_M = 40075016.686;
+
+// Ground metres per zoom-0 pixel ("world unit") at a latitude.
+export const metresPerWorldUnit = lat => EARTH_CIRCUMFERENCE_M * Math.cos(lat * Math.PI / 180) / TILE;
+
+// Normalise degrees to [0, 360); returns exactly 0 for "no rotation".
+export function normalizeAngle(deg) {
+  const a = (((Number(deg) || 0) % 360) + 360) % 360;
+  return Math.abs(a) < 1e-9 || Math.abs(a - 360) < 1e-9 ? 0 : a;
+}
+
+// Shared builder for both geometry kinds.
+function rectGeometry(centre, a, b, theta) {
+  const u = [Math.cos(theta), Math.sin(theta)], nv = [-u[1], u[0]];
+  const cornersPx = [[1, 1], [1, -1], [-1, -1], [-1, 1]].map(([sa, sb]) =>
+    [centre[0] + sa * a * u[0] + sb * b * nv[0], centre[1] + sa * a * u[1] + sb * b * nv[1]]);
+  const xs = cornersPx.map(p => p[0]), ys = cornersPx.map(p => p[1]);
+  const [w, n] = pixelToLonlat(Math.min(...xs), Math.min(...ys), 0);
+  const [e, s] = pixelToLonlat(Math.max(...xs), Math.max(...ys), 0);
+  const mpu = metresPerWorldUnit(pixelToLonlat(centre[0], centre[1], 0)[1]);
+  return {
+    centre, a, b, theta,
+    corners: cornersPx.map(([x, y]) => pixelToLonlat(x, y, 0)),
+    envelope: [w, s, e, n],
+    widthM: 2 * a * mpu, heightM: 2 * b * mpu,
+  };
+}
+
+// Corridor of half-width halfWidthM around start->end, extended by padM past each end.
+export function corridorGeometry([lat1, lon1], [lat2, lon2], halfWidthM = 20, padM = 30) {
+  const [x1, y1] = lonlatToPixel(lon1, lat1, 0), [x2, y2] = lonlatToPixel(lon2, lat2, 0);
+  const dx = x2 - x1, dy = y2 - y1, len = Math.hypot(dx, dy);
+  if (len === 0) throw new Error("Start and end points are identical.");
+  const mpu = metresPerWorldUnit((lat1 + lat2) / 2);
+  const a = len / 2 + padM / mpu, b = halfWidthM / mpu;
+  return {
+    ...rectGeometry([(x1 + x2) / 2, (y1 + y2) / 2], a, b, Math.atan2(dy, dx)),
+    kind: "corridor",
+    bearing: (Math.atan2(dx, -dy) * 180 / Math.PI + 360) % 360,
+    halfWidthM, padM, start: [lat1, lon1], end: [lat2, lon2],
+  };
+}
+
+// Predicate: does tile (tx, ty) at `zoom` possibly intersect the corridor? Conservative
+// (a tile is kept if its centre is within half a tile diagonal of the rectangle).
+export function corridorTileFilter(geom, zoom) {
+  const k = 2 ** zoom, r = TILE * Math.SQRT1_2;
+  const cx = geom.centre[0] * k, cy = geom.centre[1] * k, a = geom.a * k + r, b = geom.b * k + r;
+  const c = Math.cos(geom.theta), s = Math.sin(geom.theta);
+  return (tx, ty) => {
+    const dx = (tx + 0.5) * TILE - cx, dy = (ty + 0.5) * TILE - cy;
+    return Math.abs(dx * c + dy * s) <= a && Math.abs(-dx * s + dy * c) <= b;
+  };
+}
+
+/*
+ * A bounding box [w, s, e, n] rotated angleDeg degrees clockwise about its centre.
+ * The output image is rotated back so the box is upright, i.e. its top edge faces
+ * compass bearing angleDeg. angleDeg = 0 gives the same footprint as the plain box.
+ */
+export function rotatedBoxGeometry(bbox, angleDeg) {
+  const box = validateBbox(bbox);
+  const angle = normalizeAngle(angleDeg);
+  const { x0, y0, x1, y1 } = bboxPixelExtent(box, 0);
+  const centre = [(x0 + x1) / 2, (y0 + y1) / 2];
+  return {
+    ...rectGeometry(centre, (x1 - x0) / 2, (y1 - y0) / 2, angle * Math.PI / 180),
+    kind: "rotated", angle, bearing: angle, bbox: box,
+  };
+}
+
+// [lon, lat] of the point at fractional local coordinates (fx, fy in [-1, 1]) of a geometry.
+export function geomPoint(geom, fx, fy) {
+  const u = [Math.cos(geom.theta), Math.sin(geom.theta)], nv = [-u[1], u[0]];
+  return pixelToLonlat(
+    geom.centre[0] + fx * geom.a * u[0] + fy * geom.b * nv[0],
+    geom.centre[1] + fx * geom.a * u[1] + fy * geom.b * nv[1], 0);
+}
+
+export function chooseCorridorZoom(geom, maxPx = 4096, maxZoom = 19, minZoom = 1) {
+  for (let z = maxZoom; z >= minZoom; z--) {
+    if (2 * geom.a * 2 ** z <= maxPx && 2 * geom.b * 2 ** z <= maxPx) return z;
+  }
+  return minZoom;
+}
+
+// Rotate and crop a stitched mosaic to the rectangle. `origin` comes from stitch().
+// Output: the local x axis runs left to right (corridor: start on the left;
+// rotated box: the box appears upright).
+export function extractCorridor(stitched, origin, geom, zoom) {
+  const k = 2 ** zoom;
+  const out = document.createElement("canvas");
+  out.width = Math.max(1, Math.round(2 * geom.a * k));
+  out.height = Math.max(1, Math.round(2 * geom.b * k));
+  const ctx = out.getContext("2d");
+  ctx.fillStyle = "#808080"; ctx.fillRect(0, 0, out.width, out.height);
+  ctx.translate(out.width / 2, out.height / 2);
+  ctx.rotate(-geom.theta);
+  ctx.drawImage(stitched, -(geom.centre[0] * k - origin[0]), -(geom.centre[1] * k - origin[1]));
+  return out;
+}
+
+// Map a [lat, lon] point to rotated-canvas coordinates.
+export function corridorPoint(geom, zoom, [lat, lon], width, height) {
+  const k = 2 ** zoom;
+  const [px, py] = lonlatToPixel(lon, lat, zoom);
+  const rx = px - geom.centre[0] * k, ry = py - geom.centre[1] * k;
+  const c = Math.cos(-geom.theta), s = Math.sin(-geom.theta);
+  return [width / 2 + rx * c - ry * s, height / 2 + rx * s + ry * c];
+}
+
+// North arrow in the top-right corner of a rotated image.
+export function drawNorthArrow(canvas, theta) {
+  const size = Math.max(16, Math.min(canvas.height * 0.35, canvas.width / 20));
+  const cx = canvas.width - size * 0.9, cy = size * 0.9;
+  const nx = -Math.sin(theta), ny = -Math.cos(theta);   // north direction in the rotated frame
+  const tip = [cx + nx * size * 0.45, cy + ny * size * 0.45];
+  const tail = [cx - nx * size * 0.45, cy - ny * size * 0.45];
+  const hl = size * 0.2, hx = -ny, hy = nx;
+  const ctx = canvas.getContext("2d");
+  ctx.save();
+  ctx.strokeStyle = ctx.fillStyle = "#fff"; ctx.lineWidth = Math.max(2, size / 12);
+  ctx.shadowColor = "#000"; ctx.shadowBlur = 4;
+  ctx.beginPath(); ctx.moveTo(...tail); ctx.lineTo(...tip); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(...tip);
+  ctx.lineTo(tip[0] - nx * hl + hx * hl * 0.6, tip[1] - ny * hl + hy * hl * 0.6);
+  ctx.lineTo(tip[0] - nx * hl - hx * hl * 0.6, tip[1] - ny * hl - hy * hl * 0.6);
+  ctx.closePath(); ctx.fill();
+  ctx.font = `bold ${Math.round(size * 0.4)}px sans-serif`; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.fillText("N", tip[0] + nx * size * 0.3, tip[1] + ny * size * 0.3);
+  ctx.restore();
+}
+
+// Capture dates at five points along the segment (used instead of bbox corners).
+export async function sampleCaptureDatesAlong(release, [lat1, lon1], [lat2, lon2], zoom) {
+  const pts = [0.1, 0.3, 0.5, 0.7, 0.9].map(t => [lon1 + t * (lon2 - lon1), lat1 + t * (lat2 - lat1)]);
+  const infos = await Promise.all(pts.map(([lon, lat]) => getCaptureInfo(release, lon, lat, zoom)));
+  return infos.map(i => i.captureDate);
+}
+
+// Capture dates at four interior points of a rotated rectangle (in its own frame).
+export async function sampleCaptureDatesInBox(release, geom, zoom) {
+  const pts = [[-0.7, -0.7], [0.7, -0.7], [0.7, 0.7], [-0.7, 0.7]].map(([fx, fy]) => geomPoint(geom, fx, fy));
+  const infos = await Promise.all(pts.map(([lon, lat]) => getCaptureInfo(release, lon, lat, zoom)));
+  return infos.map(i => i.captureDate);
+}
+
+// ---------------------------------------------------------------------------
 // High-level entry point (equivalent of core.generate_image)
 // ---------------------------------------------------------------------------
 
 /*
- * params: { bbox, date, label, zoom?, maxPx?, maxZoom?, mode?, selectBy?, releaseId?, points? }
- * onStatus(text) receives progress messages.
- * Returns { canvas, filename, meta } where meta mirrors the Python result dict.
+ * params: { bbox, date, label, zoom?, maxPx?, maxZoom?, mode?, selectBy?, releaseId?, points?,
+ *           rotation?,                                       // degrees clockwise, applies to bbox
+ *           corridor?: { start, end, halfWidthM, padM } }    // overrides bbox/rotation
+ * With corridor, or with a non-zero rotation, the output is the rotated rectangle.
  */
 export async function generateImage(params, onStatus = () => {}) {
-  const bbox = validateBbox(params.bbox);
-  const zoom = params.zoom || chooseZoom(bbox, params.maxPx || 4096, params.maxZoom || 19);
+  const maxPx = params.maxPx || 4096, maxZoom = params.maxZoom || 19;
+  let geom = null, bbox, zoom;
+  if (params.corridor) {
+    const c = params.corridor;
+    geom = corridorGeometry(c.start, c.end, c.halfWidthM, c.padM);
+  } else if (normalizeAngle(params.rotation)) {
+    geom = rotatedBoxGeometry(params.bbox, params.rotation);
+  }
+  if (geom) {
+    bbox = validateBbox(geom.envelope);
+    zoom = params.zoom || chooseCorridorZoom(geom, maxPx, maxZoom);
+  } else {
+    bbox = validateBbox(params.bbox);
+    zoom = params.zoom || chooseZoom(bbox, maxPx, maxZoom);
+  }
   const [lonC, latC] = bboxCenter(bbox);
   const mode = params.mode || "nearest";
   const progress = what => (d, t) => onStatus(`${what} ${d}/${t}`);
@@ -441,12 +632,21 @@ export async function generateImage(params, onStatus = () => {}) {
     selection = `release date (${mode})`;
   }
 
-  const { canvas, tilesTotal, tilesMissing } = await stitch(bbox, release, zoom, progress("Downloading tiles"));
-  if (params.points?.length) drawPoints(canvas, bbox, zoom, params.points);
+  let { canvas, tilesTotal, tilesMissing, origin } =
+    await stitch(bbox, release, zoom, progress("Downloading tiles"), geom ? corridorTileFilter(geom, zoom) : null);
+  if (geom) canvas = extractCorridor(canvas, origin, geom, zoom);
+  if (params.points?.length) {
+    if (geom) drawCircles(canvas, params.points.map(p => corridorPoint(geom, zoom, p, canvas.width, canvas.height)));
+    else drawPoints(canvas, bbox, zoom, params.points);
+  }
+  if (geom) drawNorthArrow(canvas, geom.theta);
 
   onStatus("Checking for mixed capture dates");
-  const cornerDates = await sampleCaptureDates(release, bbox, zoom);
-  const allDates = [...new Set([...cornerDates, capture.captureDate].filter(Boolean))].sort();
+  let sampled;
+  if (geom?.kind === "corridor") sampled = await sampleCaptureDatesAlong(release, geom.start, geom.end, zoom);
+  else if (geom) sampled = await sampleCaptureDatesInBox(release, geom, zoom);
+  else sampled = await sampleCaptureDates(release, bbox, zoom);
+  const allDates = [...new Set([...sampled, capture.captureDate].filter(Boolean))].sort();
   const mixed = allDates.length > 1;
 
   const extra = [];
@@ -455,25 +655,43 @@ export async function generateImage(params, onStatus = () => {}) {
   if (mixed) extra.push(`mixed dates ${allDates[0]}..${allDates[allDates.length - 1]}`);
   const [w, s, e, n] = bbox;
   const f = v => v.toFixed(5);
+  const bearingTxt = geom ? String(Math.round(geom.bearing)).padStart(3, "0") : null;
   const lines = [
     params.label,
     `Captured: ${capture.captureDate || "unknown"}${extra.length ? ` (${extra.join(", ")})` : ""}`,
     `Requested: ${params.date}   Wayback release: ${release.date} (id ${release.id})`,
-    `BBox W,S,E,N: ${f(w)}, ${f(s)}, ${f(e)}, ${f(n)}   Zoom: ${zoom}`,
-    "Source: Esri World Imagery Wayback",
   ];
+  let suffix = "", nameBbox = bbox;
+  if (geom?.kind === "corridor") {
+    lines.push(`Aligned corridor: bearing ${bearingTxt}°, half-width ${geom.halfWidthM} m, start at left, north arrow top right`);
+    lines.push(`Envelope W,S,E,N: ${f(w)}, ${f(s)}, ${f(e)}, ${f(n)}   Zoom: ${zoom}`);
+    suffix = `_aligned-b${bearingTxt}-w${geom.halfWidthM}`;
+  } else if (geom) {
+    const [bw, bs, be, bn] = geom.bbox;
+    lines.push(`Rotated box: ${geom.angle}° clockwise (image top faces bearing ${bearingTxt}°), ` +
+        `${Math.round(geom.widthM)} x ${Math.round(geom.heightM)} m, north arrow top right`);
+    lines.push(`Box W,S,E,N before rotation: ${f(bw)}, ${f(bs)}, ${f(be)}, ${f(bn)}   Zoom: ${zoom}`);
+    suffix = `_rot${geom.angle}`;
+    nameBbox = geom.bbox;
+  } else {
+    lines.push(`BBox W,S,E,N: ${f(w)}, ${f(s)}, ${f(e)}, ${f(n)}   Zoom: ${zoom}`);
+  }
+  lines.push("Source: Esri World Imagery Wayback");
   const labeled = addLabel(canvas, lines);
-  const filename = buildFilename(params.label, params.date, release, capture.captureDate, bbox, zoom);
+  const filename = buildFilename(params.label, params.date, release, capture.captureDate, nameBbox, zoom, suffix);
 
   return {
-    canvas: labeled,
-    filename,
+    canvas: labeled, filename, corners: geom?.corners ?? null,
     meta: {
       label: params.label, requestedDate: params.date, selection,
       releaseId: release.id, releaseDate: release.date,
       captureDate: capture.captureDate, captureResolutionM: capture.resolutionM, captureProvider: capture.provider,
       captureDatesInBbox: allDates, mixedCapture: mixed,
-      bbox, zoom, width: labeled.width, height: labeled.height, tilesTotal, tilesMissing,
+      bbox, box: nameBbox, zoom,
+      bearing: geom?.bearing ?? null,
+      aligned: geom?.kind === "corridor",
+      rotated: geom?.kind === "rotated", rotation: geom?.angle ?? 0,
+      width: labeled.width, height: labeled.height, tilesTotal, tilesMissing,
     },
   };
 }

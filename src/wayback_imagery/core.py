@@ -33,7 +33,7 @@ import requests
 from PIL import Image, ImageDraw, ImageFont
 
 # ---------------------------------------------------------------------------
-# Constants
+# Constants and type aliases
 # ---------------------------------------------------------------------------
 
 WAYBACK_CONFIG_URL = (
@@ -50,6 +50,9 @@ CACHE_TTL = 6 * 3600          # seconds; applies to release list, layer lists, s
 MAX_TILES = 2500
 MAX_MERCATOR_LAT = 85.05112878
 ARCGIS_SCALE_Z0 = 591657527.591555  # map scale denominator at zoom 0, 96 dpi
+EARTH_CIRCUMFERENCE_M = 40075016.686
+
+BBox = tuple[float, float, float, float]
 
 # ---------------------------------------------------------------------------
 # Release list
@@ -370,15 +373,13 @@ def sample_capture_dates(release: Release, bbox: BBox, zoom: int,
 # Bounding box helpers
 # ---------------------------------------------------------------------------
 
-BBox = tuple[float, float, float, float]
 
-
-def bbox_from_segment(start: tuple[float, float], end: tuple[float, float],
-                      margin_m: float = 150.0, margin_frac: float = 0.25) -> BBox:
+def bbox_from_segment(start, end, margin_m=150.0, margin_frac=0.25) -> BBox:
     """
-    Bounding box around a segment (two (lat, lon) points). The margin on each
-    side is the larger of `margin_m` metres and `margin_frac` times the longer
-    side of the segment's extent.
+    Bounding box around a segment (two (lat, lon) points). Each axis gets a
+    margin equal to the larger of `margin_m` metres and `margin_frac` times the
+    segment's extent along that axis, so a long, nearly straight segment does
+    not produce a very wide box.
     """
     lat1, lon1 = start
     lat2, lon2 = end
@@ -391,11 +392,11 @@ def bbox_from_segment(start: tuple[float, float], end: tuple[float, float],
 
     width_m = (east - west) * m_per_deg_lon
     height_m = (north - south) * m_per_deg_lat
-    margin = max(margin_m, margin_frac * max(width_m, height_m))
+    margin_x = max(margin_m, margin_frac * width_m)
+    margin_y = max(margin_m, margin_frac * height_m)
 
-    return (west - margin / m_per_deg_lon, south - margin / m_per_deg_lat,
-            east + margin / m_per_deg_lon, north + margin / m_per_deg_lat)
-
+    return (west - margin_x / m_per_deg_lon, south - margin_y / m_per_deg_lat,
+            east + margin_x / m_per_deg_lon, north + margin_y / m_per_deg_lat)
 
 def validate_bbox(bbox: Iterable[float]) -> BBox:
     """Check ordering and ranges; clamp latitude to the Web Mercator limit."""
@@ -429,6 +430,14 @@ def lonlat_to_pixel(lon: float, lat: float, zoom: int) -> tuple[float, float]:
     return x, y
 
 
+def pixel_to_lonlat(x: float, y: float, zoom: int) -> tuple[float, float]:
+    """Inverse of lonlat_to_pixel. Returns (lon, lat)."""
+    n = TILE_SIZE * (2 ** zoom)
+    lon = x / n * 360.0 - 180.0
+    lat = math.degrees(math.atan(math.sinh(math.pi * (1 - 2 * y / n))))
+    return lon, lat
+
+
 def bbox_pixel_extent(bbox: BBox, zoom: int) -> tuple[float, float, float, float]:
     """Return (x0, y0, x1, y1) global pixel bounds of the bbox. y grows southward."""
     west, south, east, north = bbox
@@ -444,6 +453,168 @@ def choose_zoom(bbox: BBox, max_px: int = 4096, max_zoom: int = 19, min_zoom: in
         if (x1 - x0) <= max_px and (y1 - y0) <= max_px:
             return zoom
     return min_zoom
+
+
+# ---------------------------------------------------------------------------
+# Aligned corridor around a road segment
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Corridor:
+    """
+    Rotated rectangle of half-width half_width_m around a segment, extended by
+    pad_m past each end. Lengths are in zoom-0 pixel units; multiply by 2**zoom
+    for pixels. theta is the segment direction in radians, clockwise from
+    screen east (y grows southward). bearing is the compass bearing in degrees.
+    """
+
+    start: tuple[float, float]      # (lat, lon)
+    end: tuple[float, float]
+    centre: tuple[float, float]     # zoom-0 pixel units
+    theta: float
+    bearing: float
+    a: float                        # half-length including padding
+    b: float                        # half-width
+    corners: list[tuple[float, float]]   # (lon, lat)
+    envelope: BBox
+    half_width_m: float
+    pad_m: float
+
+
+def corridor_geometry(start: tuple[float, float], end: tuple[float, float],
+                      half_width_m: float = 20.0, pad_m: float = 30.0) -> Corridor:
+    (lat1, lon1), (lat2, lon2) = start, end
+    x1, y1 = lonlat_to_pixel(lon1, lat1, 0)
+    x2, y2 = lonlat_to_pixel(lon2, lat2, 0)
+    dx, dy = x2 - x1, y2 - y1
+    length = math.hypot(dx, dy)
+    if length == 0:
+        raise ValueError("Start and end points are identical.")
+    m_per_unit = EARTH_CIRCUMFERENCE_M * math.cos(math.radians((lat1 + lat2) / 2)) / TILE_SIZE
+    a, b = length / 2 + pad_m / m_per_unit, half_width_m / m_per_unit
+    cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+    ux, uy = dx / length, dy / length
+    nx, ny = -uy, ux
+    corners_px = [(cx + sa * a * ux + sb * b * nx, cy + sa * a * uy + sb * b * ny)
+                  for sa, sb in ((1, 1), (1, -1), (-1, -1), (-1, 1))]
+    xs, ys = [p[0] for p in corners_px], [p[1] for p in corners_px]
+    w, n = pixel_to_lonlat(min(xs), min(ys), 0)
+    e, s = pixel_to_lonlat(max(xs), max(ys), 0)
+    return Corridor(
+        start=start, end=end, centre=(cx, cy),
+        theta=math.atan2(dy, dx),
+        bearing=(math.degrees(math.atan2(dx, -dy)) + 360) % 360,
+        a=a, b=b,
+        corners=[pixel_to_lonlat(x, y, 0) for x, y in corners_px],
+        envelope=(w, s, e, n), half_width_m=half_width_m, pad_m=pad_m,
+    )
+
+def corridor_tile_filter(geom: Corridor, zoom: int):
+    """Return a predicate (tx, ty) -> bool that is False for tiles clearly outside the corridor."""
+    k = 2 ** zoom
+    r = TILE_SIZE * math.sqrt(0.5)
+    cx, cy = geom.centre[0] * k, geom.centre[1] * k
+    a, b = geom.a * k + r, geom.b * k + r
+    c, s = math.cos(geom.theta), math.sin(geom.theta)
+
+    def keep(tx: int, ty: int) -> bool:
+        dx, dy = (tx + 0.5) * TILE_SIZE - cx, (ty + 0.5) * TILE_SIZE - cy
+        return abs(dx * c + dy * s) <= a and abs(-dx * s + dy * c) <= b
+    return keep
+
+def corridor_from_box(centre: tuple[float, float], length_m: float, width_m: float, bearing: float) -> Corridor:
+    """Rotated rectangle: centre (lat, lon), length_m along `bearing` (deg, 0 = north), width_m across it."""
+    lat, lon = centre
+    cx, cy = lonlat_to_pixel(lon, lat, 0)
+    mpu = EARTH_CIRCUMFERENCE_M * math.cos(math.radians(lat)) / TILE_SIZE
+    t = math.radians(bearing)
+    dx, dy = math.sin(t) * length_m / 2 / mpu, -math.cos(t) * length_m / 2 / mpu
+    lon1, lat1 = pixel_to_lonlat(cx - dx, cy - dy, 0)
+    lon2, lat2 = pixel_to_lonlat(cx + dx, cy + dy, 0)
+    return corridor_geometry((lat1, lon1), (lat2, lon2), half_width_m=width_m / 2, pad_m=0.0)
+
+
+def corridor_from_rotated_bbox(bbox: BBox, angle_deg: float) -> Corridor:
+    """Same convention as the web UI: `bbox` is the unrotated box, rotated `angle_deg` clockwise about its centre."""
+    w, s, e, n = validate_bbox(bbox)
+    x0, y0 = lonlat_to_pixel(w, n, 0)
+    x1, y1 = lonlat_to_pixel(e, s, 0)
+    lon, lat = pixel_to_lonlat((x0 + x1) / 2, (y0 + y1) / 2, 0)
+    mpu = EARTH_CIRCUMFERENCE_M * math.cos(math.radians(lat)) / TILE_SIZE
+    return corridor_from_box((lat, lon), (x1 - x0) * mpu, (y1 - y0) * mpu, 90.0 + angle_deg)
+
+def choose_corridor_zoom(geom: Corridor, max_px: int = 4096, max_zoom: int = 19, min_zoom: int = 1) -> int:
+    for zoom in range(max_zoom, min_zoom - 1, -1):
+        if 2 * geom.a * 2 ** zoom <= max_px and 2 * geom.b * 2 ** zoom <= max_px:
+            return zoom
+    return min_zoom
+
+
+def extract_corridor(stitched: Image.Image, origin: tuple[int, int], geom: Corridor, zoom: int) -> Image.Image:
+    """
+    Rotate and crop a stitched mosaic to the corridor so the segment runs left
+    to right with the start on the left. Uses an affine transform that maps each
+    output pixel back to the mosaic: in = C + R(theta) * (out - (a, b)).
+    """
+    k = 2 ** zoom
+    width, height = max(1, round(2 * geom.a * k)), max(1, round(2 * geom.b * k))
+    a, b = width / 2, height / 2
+    cx, cy = geom.centre[0] * k - origin[0], geom.centre[1] * k - origin[1]
+    c, s = math.cos(geom.theta), math.sin(geom.theta)
+    data = (c, -s, cx - a * c + b * s,
+            s, c, cy - a * s - b * c)
+    return stitched.transform((width, height), Image.AFFINE, data,
+                              resample=Image.BICUBIC, fillcolor=(128, 128, 128))
+
+
+def corridor_point(geom: Corridor, zoom: int, point: tuple[float, float],
+                   width: int, height: int) -> tuple[float, float]:
+    """Map a (lat, lon) point to corridor image coordinates."""
+    k = 2 ** zoom
+    lat, lon = point
+    px, py = lonlat_to_pixel(lon, lat, zoom)
+    rx, ry = px - geom.centre[0] * k, py - geom.centre[1] * k
+    c, s = math.cos(-geom.theta), math.sin(-geom.theta)
+    return width / 2 + rx * c - ry * s, height / 2 + rx * s + ry * c
+
+
+def draw_north_arrow(image: Image.Image, theta: float) -> None:
+    """North arrow in the top-right corner of a rotated image. Modifies in place."""
+    size = max(16, min(image.height * 0.35, image.width / 20))
+    cx, cy = image.width - size * 0.9, size * 0.9
+    nx, ny = -math.sin(theta), -math.cos(theta)
+    tip = (cx + nx * size * 0.45, cy + ny * size * 0.45)
+    tail = (cx - nx * size * 0.45, cy - ny * size * 0.45)
+    hl, hx, hy = size * 0.2, -ny, nx
+    draw = ImageDraw.Draw(image)
+    lw = max(2, int(size / 12))
+    for color, offset in (((0, 0, 0), 2), ((255, 255, 255), 0)):  # dark shadow, then white
+        o = offset / 2
+        draw.line([(tail[0] + o, tail[1] + o), (tip[0] + o, tip[1] + o)], fill=color, width=lw + offset)
+        draw.polygon([
+            (tip[0] + o, tip[1] + o),
+            (tip[0] - nx * hl + hx * hl * 0.6 + o, tip[1] - ny * hl + hy * hl * 0.6 + o),
+            (tip[0] - nx * hl - hx * hl * 0.6 + o, tip[1] - ny * hl - hy * hl * 0.6 + o),
+        ], fill=color)
+    font = _load_font(max(10, int(size * 0.4)))
+    pos = (tip[0] + nx * size * 0.3, tip[1] + ny * size * 0.3)
+    try:
+        draw.text(pos, "N", fill=(255, 255, 255), font=font, anchor="mm",
+                  stroke_width=1, stroke_fill=(0, 0, 0))
+    except (ValueError, TypeError):  # Pillow bitmap fallback font: no anchor/stroke support
+        draw.text(pos, "N", fill=(255, 255, 255), font=font)
+
+
+def sample_capture_dates_along(release: Release, start: tuple[float, float], end: tuple[float, float],
+                               zoom: int, session: requests.Session | None = None) -> list[dt.date | None]:
+    """Capture dates at five points along the segment."""
+    (lat1, lon1), (lat2, lon2) = start, end
+    pts = [(lon1 + t * (lon2 - lon1), lat1 + t * (lat2 - lat1)) for t in (0.1, 0.3, 0.5, 0.7, 0.9)]
+    session = session or _make_session()
+    with ThreadPoolExecutor(max_workers=5) as pool:
+        infos = list(pool.map(lambda p: get_capture_info(release, p[0], p[1], zoom, session), pts))
+    return [i.capture_date for i in infos]
 
 
 # ---------------------------------------------------------------------------
@@ -474,7 +645,7 @@ def fetch_tile(session: requests.Session, url: str, retries: int = 3,
 
 
 def stitch(bbox: BBox, release: Release, zoom: int, workers: int = 8,
-           session: requests.Session | None = None) -> tuple[Image.Image, dict]:
+           session: requests.Session | None = None, keep=None) -> tuple[Image.Image, dict]:
     """Download all tiles covering bbox, paste onto a canvas, crop to the exact bbox."""
     session = session or _make_session()
     x0, y0, x1, y1 = bbox_pixel_extent(bbox, zoom)
@@ -482,12 +653,13 @@ def stitch(bbox: BBox, release: Release, zoom: int, workers: int = 8,
     tx1 = math.ceil(x1 / TILE_SIZE) - 1
     ty1 = math.ceil(y1 / TILE_SIZE) - 1
     cols, rows = tx1 - tx0 + 1, ty1 - ty0 + 1
-    if cols * rows > MAX_TILES:
-        raise ValueError(f"Request needs {cols * rows} tiles (limit {MAX_TILES}). Reduce area or zoom.")
 
     # Gray canvas; tiles that fail to download stay gray.
+    tiles = [(tx, ty) for ty in range(ty0, ty1 + 1) for tx in range(tx0, tx1 + 1)
+             if keep is None or keep(tx, ty)]
+    if len(tiles) > MAX_TILES:
+        raise ValueError(f"Request needs {len(tiles)} tiles (limit {MAX_TILES}). Reduce area or zoom.")
     canvas = Image.new("RGB", (cols * TILE_SIZE, rows * TILE_SIZE), (128, 128, 128))
-    tiles = [(tx, ty) for ty in range(ty0, ty1 + 1) for tx in range(tx0, tx1 + 1)]
 
     def work(t):
         tx, ty = t
@@ -505,7 +677,9 @@ def stitch(bbox: BBox, release: Release, zoom: int, workers: int = 8,
         round(x0 - tx0 * TILE_SIZE), round(y0 - ty0 * TILE_SIZE),
         round(x1 - tx0 * TILE_SIZE), round(y1 - ty0 * TILE_SIZE),
     ))
-    return cropped, {"tiles_total": len(tiles), "tiles_missing": missing}
+
+    origin = (tx0 * TILE_SIZE + round(x0 - tx0 * TILE_SIZE), ty0 * TILE_SIZE + round(y0 - ty0 * TILE_SIZE))
+    return cropped, {"tiles_total": len(tiles), "tiles_missing": missing, "origin": origin}
 
 
 # ---------------------------------------------------------------------------
@@ -546,16 +720,20 @@ def add_label(image: Image.Image, lines: Sequence[str], padding: int = 8) -> Ima
     return out
 
 
-def draw_points(image: Image.Image, bbox: BBox, zoom: int, points: Sequence[tuple[float, float]],
-                color=(255, 40, 40)) -> None:
-    """Circle marker at each (lat, lon) point. Modifies image in place."""
-    x0, y0, _, _ = bbox_pixel_extent(bbox, zoom)
-    r = max(5, image.width // 150)
+def draw_circles(image: Image.Image, pts: Sequence[tuple[float, float]], color=(255, 40, 40)) -> None:
+    r = max(5, min(image.width, image.height * 3) // 150)
     draw = ImageDraw.Draw(image)
+    for cx, cy in pts:
+        draw.ellipse((cx - r, cy - r, cx + r, cy + r), outline=color, width=max(2, r // 2))
+
+
+def draw_points(image, bbox, zoom, points, color=(255, 40, 40)) -> None:
+    x0, y0, _, _ = bbox_pixel_extent(bbox, zoom)
+    pts = []
     for lat, lon in points:
         px, py = lonlat_to_pixel(lon, lat, zoom)
-        cx, cy = px - x0, py - y0
-        draw.ellipse((cx - r, cy - r, cx + r, cy + r), outline=color, width=max(2, r // 2))
+        pts.append((px - x0, py - y0))
+    draw_circles(image, pts, color)
 
 
 # ---------------------------------------------------------------------------
@@ -570,13 +748,13 @@ def slugify(text: str) -> str:
 
 
 def build_filename(label: str, requested: dt.date, release: Release,
-                   capture_date: dt.date | None, bbox: BBox, zoom: int, ext: str = "png") -> str:
+                   capture_date: dt.date | None, bbox: BBox, zoom: int, suffix: str = "", ext: str = "png") -> str:
     """Encode label, requested date, capture date, release, bbox and zoom in the filename."""
     w, s, e, n = bbox
     cap = capture_date.isoformat() if capture_date else "unknown"
     return (f"{slugify(label)}_req{requested.isoformat()}_cap{cap}"
             f"_rel{release.date.isoformat()}-r{release.release_id}"
-            f"_bbox{w:.5f}_{s:.5f}_{e:.5f}_{n:.5f}_z{zoom}.{ext}")
+            f"_bbox{w:.5f}_{s:.5f}_{e:.5f}_{n:.5f}_z{zoom}{suffix}.{ext}")
 
 
 # ---------------------------------------------------------------------------
@@ -598,6 +776,7 @@ def generate_image(
     points: Sequence[tuple[float, float]] | None = None,
     workers: int = 8,
     ext: str = "png",
+    corridor: Corridor | None = None,
 ) -> dict:
     """
     Full pipeline: choose zoom, select release, download, stitch, annotate, save.
@@ -606,11 +785,18 @@ def generate_image(
       "capture" - release whose capture date at the bbox center is closest to `date`
       "release" - release whose release date is closest to `date`
     release_id, if given, overrides both.
+    corridor, if given, overrides bbox and produces a rotated strip.
     """
-    bbox = validate_bbox(bbox)
-    if zoom is None:
-        zoom = choose_zoom(bbox, max_px=max_px, max_zoom=max_zoom)
+    if corridor is not None:
+        bbox = validate_bbox(corridor.envelope)
+        if zoom is None:
+            zoom = choose_corridor_zoom(corridor, max_px=max_px, max_zoom=max_zoom)
+    else:
+        bbox = validate_bbox(bbox)
+        if zoom is None:
+            zoom = choose_zoom(bbox, max_px=max_px, max_zoom=max_zoom)
     lon_c, lat_c = bbox_center(bbox)
+
     session = _make_session()
 
     if release_id is not None:
@@ -628,13 +814,24 @@ def generate_image(
     else:
         raise ValueError("select_by must be 'capture' or 'release'.")
 
-    image, stats = stitch(bbox, release, zoom, workers=workers, session=session)
+    image, stats = stitch(bbox, release, zoom, workers=workers, session=session,
+                          keep=corridor_tile_filter(corridor, zoom) if corridor is not None else None)
+    origin = stats.pop("origin")
+    if corridor is not None:
+        image = extract_corridor(image, origin, corridor, zoom)
     if points:
-        draw_points(image, bbox, zoom, points)
+        if corridor is not None:
+            draw_circles(image, [corridor_point(corridor, zoom, p, image.width, image.height) for p in points])
+        else:
+            draw_points(image, bbox, zoom, points)
+    if corridor is not None:
+        draw_north_arrow(image, corridor.theta)
 
-    # Check whether the bbox spans images with different capture dates.
-    corner_dates = sample_capture_dates(release, bbox, zoom, session)
-    all_dates = sorted({d for d in [*corner_dates, capture.capture_date] if d})
+    if corridor is not None:
+        sampled = sample_capture_dates_along(release, corridor.start, corridor.end, zoom, session)
+    else:
+        sampled = sample_capture_dates(release, bbox, zoom, session)
+    all_dates = sorted({d for d in [*sampled, capture.capture_date] if d})
     mixed = len(all_dates) > 1
 
     cap_text = capture.capture_date.isoformat() if capture.capture_date else "unknown"
@@ -648,19 +845,23 @@ def generate_image(
     cap_line = f"Captured: {cap_text}" + (f" ({', '.join(extra)})" if extra else "")
 
     w, s, e, n = bbox
-    lines = [
-        label,
-        cap_line,
-        f"Requested: {date.isoformat()}   "
-        f"Wayback release: {release.date.isoformat()} (id {release.release_id})",
-        f"BBox W,S,E,N: {w:.5f}, {s:.5f}, {e:.5f}, {n:.5f}   Zoom: {zoom}",
-        "Source: Esri World Imagery Wayback",
-    ]
+    bearing_txt = f"{round(corridor.bearing):03d}" if corridor is not None else None
+    lines = [label, cap_line,
+             f"Requested: {date.isoformat()}   "
+             f"Wayback release: {release.date.isoformat()} (id {release.release_id})"]
+    if corridor is not None:
+        lines.append(f"Aligned corridor: bearing {bearing_txt}°, half-width {corridor.half_width_m:g} m, "
+                     "start at left, north arrow top right")
+        lines.append(f"Envelope W,S,E,N: {w:.5f}, {s:.5f}, {e:.5f}, {n:.5f}   Zoom: {zoom}")
+    else:
+        lines.append(f"BBox W,S,E,N: {w:.5f}, {s:.5f}, {e:.5f}, {n:.5f}   Zoom: {zoom}")
+    lines.append("Source: Esri World Imagery Wayback")
     labeled = add_label(image, lines)
 
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    filename = build_filename(label, date, release, capture.capture_date, bbox, zoom, ext=ext)
+    suffix = f"_aligned-b{bearing_txt}-w{corridor.half_width_m:g}" if corridor is not None else ""
+    filename = build_filename(label, date, release, capture.capture_date, bbox, zoom, suffix=suffix, ext=ext)
     path = out_dir / filename
     labeled.save(path, **({"quality": 92} if ext.lower() in ("jpg", "jpeg") else {}))
 
@@ -681,5 +882,8 @@ def generate_image(
         "zoom": zoom,
         "width": labeled.width,
         "height": labeled.height,
+        "aligned": corridor is not None,
+        "bearing": corridor.bearing if corridor is not None else None,
+        "corners": [list(c) for c in corridor.corners] if corridor is not None else None,
         **stats,
     }
