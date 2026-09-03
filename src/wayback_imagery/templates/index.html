@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Wayback historical imagery</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<link rel="stylesheet" href="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.css">
+<style>
+  body { font-family: system-ui, sans-serif; margin: 1.5rem; color: #222; }
+  .layout { display: grid; grid-template-columns: 400px 1fr; gap: 1.5rem; align-items: start; }
+  #map { height: 560px; border: 1px solid #ccc; }
+  form label { display: block; margin: .4rem 0 .1rem; font-size: .9rem; }
+  form input[type=text], form input[type=number], form input[type=date], form select {
+    width: 100%; box-sizing: border-box; padding: .3rem; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: .4rem; }
+  fieldset { border: 1px solid #ccc; margin: .8rem 0; padding: .5rem .8rem; }
+  .radio { display: flex; gap: .4rem; align-items: center; margin-top: .6rem; font-weight: 600; }
+  button, .button { display: inline-block; margin-top: .6rem; padding: .5rem 1rem; background: #1a5fb4;
+    color: #fff; border: 0; border-radius: 4px; text-decoration: none; cursor: pointer; }
+  button.secondary { background: #666; }
+  .hint { font-size: .8rem; color: #555; }
+  .error { color: #b00020; background: #fde8ea; padding: .6rem; border-radius: 4px; }
+  .warn { color: #7a4b00; background: #fff3d6; padding: .4rem .6rem; border-radius: 4px; }
+  .result img { max-width: 100%; border: 1px solid #ccc; margin-top: .5rem; }
+  .meta { font-size: .85rem; color: #444; }
+  table.caps { border-collapse: collapse; font-size: .85rem; margin-top: .5rem; width: 100%; }
+  table.caps td, table.caps th { border: 1px solid #ddd; padding: .2rem .4rem; text-align: left; }
+  table.caps button { margin: 0; padding: .1rem .5rem; font-size: .8rem; }
+</style>
+</head>
+<body>
+
+<h1>Historical imagery (Esri World Imagery Wayback)</h1>
+
+<div class="layout">
+  <!-- Input form. Values are re-populated from the previous submission. -->
+  <form method="post" id="form">
+    <label for="label">Label (caption and filename)</label>
+    <input type="text" id="label" name="label" value="{{ form.label or '' }}" placeholder="e.g. SR-1 PM 10.2-10.8">
+
+    <label for="date">Date</label>
+    <input type="date" id="date" name="date" value="{{ form.date or '' }}" required>
+
+    <div class="grid">
+      <div>
+        <label for="select_by">Match date against</label>
+        <select id="select_by" name="select_by">
+          <option value="capture" {{ 'selected' if form.select_by in (none, '', 'capture') }}>Capture date (photo taken)</option>
+          <option value="release" {{ 'selected' if form.select_by == 'release' }}>Release date (snapshot published)</option>
+        </select>
+      </div>
+      <div>
+        <label for="mode">Rule</label>
+        <select id="mode" name="mode">
+          <option value="nearest" {{ 'selected' if form.mode in (none, '', 'nearest') }}>Nearest</option>
+          <option value="before"  {{ 'selected' if form.mode == 'before' }}>Latest on/before</option>
+          <option value="after"   {{ 'selected' if form.mode == 'after' }}>Earliest on/after</option>
+        </select>
+      </div>
+    </div>
+
+    <label for="release_id">Release ID override (optional; filled by "Use" below)</label>
+    <input type="number" id="release_id" name="release_id" value="{{ form.release_id or '' }}">
+
+    <fieldset>
+      <legend>Area of interest</legend>
+      <label class="radio">
+        <input type="radio" name="area_mode" value="segment" id="mode-segment" {{ 'checked' if form.area_mode != 'bbox' }}>
+        Road segment (start / end points)
+      </label>
+      <div class="grid">
+        <div><label for="start_lat">Start lat</label><input type="number" step="any" id="start_lat" name="start_lat" value="{{ form.start_lat or '' }}"></div>
+        <div><label for="start_lon">Start lon</label><input type="number" step="any" id="start_lon" name="start_lon" value="{{ form.start_lon or '' }}"></div>
+        <div><label for="end_lat">End lat</label><input type="number" step="any" id="end_lat" name="end_lat" value="{{ form.end_lat or '' }}"></div>
+        <div><label for="end_lon">End lon</label><input type="number" step="any" id="end_lon" name="end_lon" value="{{ form.end_lon or '' }}"></div>
+        <div><label for="margin_m">Min. margin (m)</label><input type="number" step="any" id="margin_m" name="margin_m" value="{{ form.margin_m or 150 }}"></div>
+        <div><label>&nbsp;</label><label><input type="checkbox" name="markers" value="1" {{ 'checked' if (not form) or form.markers }}> Draw endpoint markers</label></div>
+      </div>
+
+      <label class="radio">
+        <input type="radio" name="area_mode" value="bbox" id="mode-bbox" {{ 'checked' if form.area_mode == 'bbox' }}>
+        Bounding box
+      </label>
+      <div class="grid">
+        <div><label for="west">West</label><input type="number" step="any" id="west" name="west" value="{{ form.west or '' }}"></div>
+        <div><label for="east">East</label><input type="number" step="any" id="east" name="east" value="{{ form.east or '' }}"></div>
+        <div><label for="south">South</label><input type="number" step="any" id="south" name="south" value="{{ form.south or '' }}"></div>
+        <div><label for="north">North</label><input type="number" step="any" id="north" name="north" value="{{ form.north or '' }}"></div>
+      </div>
+    </fieldset>
+
+    <details>
+      <summary>Advanced</summary>
+      <div class="grid">
+        <div><label for="zoom">Zoom (blank = auto)</label><input type="number" id="zoom" name="zoom" min="1" max="23" value="{{ form.zoom or '' }}"></div>
+        <div><label for="max_px">Max output px</label><input type="number" id="max_px" name="max_px" value="{{ form.max_px or 4096 }}"></div>
+      </div>
+    </details>
+
+    <button type="submit">Fetch image</button>
+    <button type="button" class="secondary" id="list-captures">List capture dates for this area</button>
+    <div id="captures"></div>
+
+    <p class="hint">
+      Map: rectangle tool sets the bounding box; with "Road segment" selected, click twice to set start and end.
+      "List capture dates" scans all releases at the area center and shows each distinct photo once.
+    </p>
+  </form>
+
+  <div id="map"></div>
+</div>
+
+{% if error %}<p class="error">{{ error }}</p>{% endif %}
+
+{% if result %}
+  <section class="result">
+    <h2>Result</h2>
+    <p class="meta">
+      File: <code>{{ result.filename }}</code><br>
+      Captured: <strong>{{ result.capture_date or 'unknown' }}</strong>
+      {% if result.capture_resolution_m %}({{ result.capture_resolution_m }} m{% if result.capture_provider %}, {{ result.capture_provider }}{% endif %}){% endif %}<br>
+      Selected by {{ result.selection }}: Wayback release {{ result.release_date }} (id {{ result.release_id }}) for requested date {{ result.requested_date }}<br>
+      Zoom {{ result.zoom }}, {{ result.width }}&times;{{ result.height }} px, {{ result.tiles_missing }} of {{ result.tiles_total }} tiles missing
+    </p>
+    {% if result.mixed_capture %}
+      <p class="warn">This area spans imagery from more than one date: {{ result.capture_dates_in_bbox | join(', ') }}.</p>
+    {% endif %}
+    <a class="button" href="{{ url_for('download', name=result.filename) }}">Download</a><br>
+    <img src="{{ url_for('image', name=result.filename) }}" alt="Stitched imagery">
+  </section>
+{% endif %}
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.js"></script>
+<script>
+// Result of the last request (or null), used to show its footprint on the map.
+const RESULT = {{ result | tojson }};
+const $ = id => document.getElementById(id);
+const fmt = v => v.toFixed(6);
+
+// --- Base map -------------------------------------------------------------
+const map = L.map('map').setView([36.5, -119.5], 6);
+const osm = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+  { maxZoom: 19, attribution: '&copy; OpenStreetMap contributors' }).addTo(map);
+const esri = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+  { maxZoom: 19, attribution: 'Esri World Imagery (current)' });
+L.control.layers({ 'OpenStreetMap': osm, 'Esri imagery (current)': esri }).addTo(map);
+
+// --- Rectangle drawing -> bbox fields -------------------------------------
+const drawn = new L.FeatureGroup().addTo(map);
+map.addControl(new L.Control.Draw({
+  draw: { polygon: false, polyline: false, circle: false, marker: false, circlemarker: false,
+          rectangle: { shapeOptions: { color: '#e6a100', weight: 2 } } },
+  edit: { featureGroup: drawn, remove: true }
+}));
+let rect = null, drawing = false;
+map.on('draw:drawstart', () => drawing = true);
+map.on('draw:drawstop', () => drawing = false);
+
+function setBBoxInputs(b) {
+  $('west').value = fmt(b.getWest()); $('east').value = fmt(b.getEast());
+  $('south').value = fmt(b.getSouth()); $('north').value = fmt(b.getNorth());
+}
+function drawRect(bounds) {
+  if (rect) drawn.removeLayer(rect);
+  rect = L.rectangle(bounds, { color: '#e6a100', weight: 2 });
+  drawn.addLayer(rect);
+}
+map.on(L.Draw.Event.CREATED, e => { drawRect(e.layer.getBounds()); setBBoxInputs(rect.getBounds()); $('mode-bbox').checked = true; });
+map.on(L.Draw.Event.EDITED, e => e.layers.eachLayer(l => { if (l === rect) setBBoxInputs(l.getBounds()); }));
+map.on(L.Draw.Event.DELETED, e => e.layers.eachLayer(l => { if (l === rect) rect = null; }));
+
+// Typing into the bbox fields updates the rectangle on the map.
+['west', 'south', 'east', 'north'].forEach(id => $(id).addEventListener('change', () => {
+  const w = parseFloat($('west').value), s = parseFloat($('south').value),
+        e = parseFloat($('east').value), n = parseFloat($('north').value);
+  if ([w, s, e, n].every(Number.isFinite)) drawRect([[s, w], [n, e]]);
+}));
+
+// --- Segment clicks -> start/end fields ------------------------------------
+const markers = { start: null, end: null };
+let nextPoint = 'start';
+function setPoint(which, latlng) {
+  $(which + '_lat').value = fmt(latlng.lat); $(which + '_lon').value = fmt(latlng.lng);
+  if (markers[which]) map.removeLayer(markers[which]);
+  markers[which] = L.circleMarker(latlng, { radius: 7, color: which === 'start' ? '#2a9d3f' : '#d62828', weight: 3 })
+    .bindTooltip(which, { permanent: true, direction: 'top' }).addTo(map);
+}
+map.on('click', e => {
+  if (drawing || !$('mode-segment').checked) return;
+  setPoint(nextPoint, e.latlng);
+  nextPoint = nextPoint === 'start' ? 'end' : 'start';
+});
+['start', 'end'].forEach(which => ['_lat', '_lon'].forEach(suffix =>
+  $(which + suffix).addEventListener('change', () => {
+    const lat = parseFloat($(which + '_lat').value), lon = parseFloat($(which + '_lon').value);
+    if (Number.isFinite(lat) && Number.isFinite(lon)) setPoint(which, L.latLng(lat, lon));
+  })));
+
+// --- Restore map state from previous submission ---------------------------
+['start', 'end'].forEach(which => $(which + '_lat').dispatchEvent(new Event('change')));
+$('west').dispatchEvent(new Event('change'));
+if (RESULT && RESULT.bbox) {
+  const [w, s, e, n] = RESULT.bbox;
+  const fp = L.rectangle([[s, w], [n, e]], { color: '#1a5fb4', weight: 2, fill: false, dashArray: '6 4' }).addTo(map);
+  map.fitBounds(fp.getBounds().pad(0.2));
+}
+
+// --- Capture-date listing -------------------------------------------------
+// Sends the current form fields to /api/captures and renders the distinct
+// photos available at the area center. "Use" fills release_id and date.
+$('list-captures').addEventListener('click', async () => {
+  const out = $('captures');
+  out.textContent = 'Scanning releases...';
+  const params = new URLSearchParams(new FormData($('form')));
+  let data;
+  try {
+    const resp = await fetch('/api/captures?' + params.toString());
+    data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || resp.statusText);
+  } catch (err) {
+    out.innerHTML = '<span class="error">' + err.message + '</span>';
+    return;
+  }
+  if (!data.captures.length) { out.textContent = 'No capture-date metadata found here.'; return; }
+  const rows = data.captures.map(c =>
+    `<tr><td>${c.capture_date}</td><td>${c.release_date}<br><small>id ${c.release_id}</small></td>` +
+    `<td>${c.resolution_m ?? ''}</td><td>${c.provider ?? ''}</td>` +
+    `<td><button type="button" data-id="${c.release_id}" data-date="${c.capture_date}">Use</button></td></tr>`).join('');
+  out.innerHTML = `<div class="hint">${data.captures.length} distinct photos at center (zoom ${data.zoom})</div>` +
+    `<table class="caps"><tr><th>Captured</th><th>Release</th><th>Res (m)</th><th>Provider</th><th></th></tr>${rows}</table>`;
+  out.querySelectorAll('button[data-id]').forEach(b => b.addEventListener('click', () => {
+    $('release_id').value = b.dataset.id;
+    $('date').value = b.dataset.date;
+  }));
+});
+</script>
+</body>
+</html>

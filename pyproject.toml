@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wayback-imagery"
+version = "0.1.0"
+description = "Download, stitch, and label historical Esri World Imagery Wayback tiles, selected by imagery capture date."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+authors = [{ name = "Emmet Barwick" }]
+keywords = ["gis", "esri", "wayback", "historical imagery", "satellite", "tiles"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+  "Topic :: Scientific/Engineering :: GIS",
+]
+dependencies = [
+  "flask>=3.0",
+  "requests>=2.31",
+  "pillow>=10.1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.5"]
+
+[project.urls]
+Homepage = "https://github.com/erbarwick/wayback-imagery"
+Issues = "https://github.com/erbarwick/wayback-imagery/issues"
+
+[project.scripts]
+wayback-imagery = "wayback_imagery.cli:main"
+wayback-imagery-web = "wayback_imagery.app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+wayback_imagery = ["templates/*.html"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "DTZ", "RUF"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
