@@ -21,7 +21,10 @@ import requests
 from .core import (
     bbox_center,
     bbox_from_segment,
+    choose_corridor_zoom,
     choose_zoom,
+    corridor_from_rotated_bbox,
+    corridor_geometry,
     distinct_captures,
     generate_image,
     get_releases,
@@ -70,18 +73,38 @@ def build_parser() -> argparse.ArgumentParser:
                    help="List distinct capture dates at the area center and exit.")
     p.add_argument("--all-captures", action="store_true",
                    help="Download one image per distinct capture date at the area center.")
+    p.add_argument("--aligned", action="store_true",
+                   help="With --segment: rotate so the road runs left to right and crop to a "
+                        "narrow corridor.")
+    p.add_argument("--half-width-m", type=float, default=20.0,
+                   help="Corridor half-width in metres (with --aligned).")
+    p.add_argument("--pad-m", type=float, default=30.0,
+                   help="Corridor padding past each endpoint (with --aligned).")
+    p.add_argument("--margin-frac", type=float, default=0.25,
+                   help="Margin as a fraction of the segment extent along each axis (min. --margin-m).")
+    p.add_argument("--rotate", type=float, metavar="DEG",
+                   help="With --bbox: rotate the box DEG clockwise about its centre and output it "
+                        "with its long axis running left to right.")
     return p
 
 
 def resolve_area(args):
-    """Return (bbox, marker_points) from --bbox or --segment."""
+    """Return (bbox, marker_points, corridor)."""
     if args.segment:
         lat1, lon1, lat2, lon2 = args.segment
         start, end = (lat1, lon1), (lat2, lon2)
-        bbox = bbox_from_segment(start, end, margin_m=args.margin_m)
-        return bbox, (None if args.no_markers else [start, end])
-    return tuple(args.bbox), None
-
+        points = None if args.no_markers else [start, end]
+        if args.aligned:
+            geom = corridor_geometry(start, end, args.half_width_m, args.pad_m)
+            return geom.envelope, points, geom
+        bbox = bbox_from_segment(start, end, margin_m=args.margin_m, margin_frac=args.margin_frac), points, None
+        return bbox, points, None
+    if args.aligned:
+        raise SystemExit("error: --aligned requires --segment.")
+    if args.rotate:
+        geom = corridor_from_rotated_bbox(tuple(args.bbox), args.rotate)
+        return geom.envelope, None, geom
+    return tuple(args.bbox), None, None
 
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
@@ -94,12 +117,15 @@ def main(argv=None) -> int:
     if not (args.bbox or args.segment):
         print("error: one of --bbox or --segment is required.", file=sys.stderr)
         return 2
-    bbox, points = resolve_area(args)
+    bbox, points, corridor = resolve_area(args)
 
     # Listing or bulk download by capture date: scan the center point once.
     if args.list_captures or args.all_captures:
         vb = validate_bbox(bbox)
-        zoom = args.zoom or choose_zoom(vb, max_px=args.max_px, max_zoom=args.max_zoom)
+        if corridor is not None:
+            zoom = choose_corridor_zoom(corridor, max_zoom=args.max_zoom, max_px=args.max_px)
+        else:
+            zoom = args.zoom or choose_zoom(vb, max_px=args.max_px, max_zoom=args.max_zoom)
         lon, lat = bbox_center(vb)
         caps = distinct_captures(scan_captures(lon, lat, zoom))
         if args.list_captures:
@@ -126,7 +152,7 @@ def main(argv=None) -> int:
                 bbox=bbox, date=date, label=args.label, out_dir=args.out, zoom=args.zoom,
                 max_px=args.max_px, max_zoom=args.max_zoom, mode=args.mode,
                 select_by=args.select_by, release_id=rid, points=points,
-                workers=args.workers, ext=args.format,
+                workers=args.workers, ext=args.format, corridor=corridor,
             )
             results.append(r)
             if not args.json:

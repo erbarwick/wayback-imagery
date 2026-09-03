@@ -26,6 +26,14 @@
   table.caps { border-collapse: collapse; font-size: .85rem; margin-top: .5rem; width: 100%; }
   table.caps td, table.caps th { border: 1px solid #ddd; padding: .2rem .4rem; text-align: left; }
   table.caps button { margin: 0; padding: .1rem .5rem; font-size: .8rem; }
+
+  /* Rotatable bounding box handles */
+  .rbox-body { cursor: move; }
+  .rbox-rotate { background: #fff; border: 2px solid #e6a100; border-radius: 50%;
+    box-shadow: 0 0 3px rgba(0,0,0,.6); text-align: center; line-height: 18px;
+    font-size: 14px; font-weight: bold; color: #e6a100; cursor: grab; }
+  .rbox-corner { background: #e6a100; border: 1px solid #fff; border-radius: 2px;
+    box-shadow: 0 0 3px rgba(0,0,0,.6); cursor: nwse-resize; }
 </style>
 </head>
 <body>
@@ -74,19 +82,34 @@
         <div><label for="end_lat">End lat</label><input type="number" step="any" id="end_lat" name="end_lat" value="{{ form.end_lat or '' }}"></div>
         <div><label for="end_lon">End lon</label><input type="number" step="any" id="end_lon" name="end_lon" value="{{ form.end_lon or '' }}"></div>
         <div><label for="margin_m">Min. margin (m)</label><input type="number" step="any" id="margin_m" name="margin_m" value="{{ form.margin_m or 150 }}"></div>
-        <div><label>&nbsp;</label><label><input type="checkbox" name="markers" value="1" {{ 'checked' if (not form) or form.markers }}> Draw endpoint markers</label></div>
+        <div><label>&nbsp;</label><label><input type="checkbox" id="markers" name="markers" value="1" {{ 'checked' if (not form) or form.markers }}> Draw endpoint markers</label></div>
+        <div style="grid-column: 1 / -1"><label><input type="checkbox" id="aligned" name="aligned" value="1" {{ 'checked' if form.aligned }}>
+          Align to segment (narrow corridor, rotated so the road runs left to right)</label></div>
+        <div><label for="half_width_m">Corridor half-width (m)</label>
+          <input type="number" step="any" min="2" id="half_width_m" name="half_width_m" value="{{ form.half_width_m or 20 }}"></div>
+        <div><label for="pad_m">Padding past ends (m)</label>
+          <input type="number" step="any" min="0" id="pad_m" name="pad_m" value="{{ form.pad_m or 30 }}"></div>
       </div>
 
       <label class="radio">
         <input type="radio" name="area_mode" value="bbox" id="mode-bbox" {{ 'checked' if form.area_mode == 'bbox' }}>
-        Bounding box
+        Bounding box (rotatable)
       </label>
       <div class="grid">
         <div><label for="west">West</label><input type="number" step="any" id="west" name="west" value="{{ form.west or '' }}"></div>
         <div><label for="east">East</label><input type="number" step="any" id="east" name="east" value="{{ form.east or '' }}"></div>
         <div><label for="south">South</label><input type="number" step="any" id="south" name="south" value="{{ form.south or '' }}"></div>
         <div><label for="north">North</label><input type="number" step="any" id="north" name="north" value="{{ form.north or '' }}"></div>
+        <div><label for="bbox_angle">Rotation (° clockwise)</label>
+          <input type="number" step="any" id="bbox_angle" name="bbox_angle" value="{{ form.bbox_angle or 0 }}"></div>
+        <div><label>&nbsp;</label>
+          <button type="button" class="secondary" id="clear-box" style="margin-top:0">Clear box</button></div>
       </div>
+      <p class="hint" style="margin:.4rem 0 0">
+        West/South/East/North describe the box before rotation; rotation turns it about its centre.
+        On the map: drag &#8635; to rotate (Shift snaps to 5&deg;), corners to resize, the body to move.
+        The output is rotated so the box is upright, with the &#8635; end on the right and a north arrow.
+      </p>
     </fieldset>
 
     <details>
@@ -102,7 +125,8 @@
     <div id="captures"></div>
 
     <p class="hint">
-      Map: rectangle tool sets the bounding box; with "Road segment" selected, click twice to set start and end.
+      Map: the rectangle tool draws the bounding box, which can then be rotated, resized and moved.
+      With "Road segment" selected, click twice to set start and end.
       "List capture dates" scans all releases at the area center and shows each distinct photo once.
     </p>
   </form>
@@ -121,6 +145,14 @@
       {% if result.capture_resolution_m %}({{ result.capture_resolution_m }} m{% if result.capture_provider %}, {{ result.capture_provider }}{% endif %}){% endif %}<br>
       Selected by {{ result.selection }}: Wayback release {{ result.release_date }} (id {{ result.release_id }}) for requested date {{ result.requested_date }}<br>
       Zoom {{ result.zoom }}, {{ result.width }}&times;{{ result.height }} px, {{ result.tiles_missing }} of {{ result.tiles_total }} tiles missing
+      {% if result.aligned %}
+        <br>
+        {% if form.area_mode == 'bbox' %}
+          Box rotated {{ form.bbox_angle }}&deg; clockwise (bearing {{ result.bearing | round | int }}&deg;); north arrow marks north.
+        {% else %}
+          Aligned corridor, bearing {{ result.bearing | round | int }}&deg;; north arrow marks north.
+        {% endif %}
+      {% endif %}
     </p>
     {% if result.mixed_capture %}
       <p class="warn">This area spans imagery from more than one date: {{ result.capture_dates_in_bbox | join(', ') }}.</p>
@@ -138,6 +170,26 @@ const RESULT = {{ result | tojson }};
 const $ = id => document.getElementById(id);
 const fmt = v => v.toFixed(6);
 
+// --- Web Mercator helpers (zoom-0 pixel units; mirror core.py) ------------
+const TILE = 256, EARTH_M = 40075016.686;
+function toPx(lon, lat) {                      // -> [x, y], y grows south
+  const r = lat * Math.PI / 180;
+  return [(lon + 180) / 360 * TILE, (1 - Math.log(Math.tan(r) + 1 / Math.cos(r)) / Math.PI) / 2 * TILE];
+}
+function toLonLat(x, y) {                      // -> [lon, lat]
+  return [x / TILE * 360 - 180, Math.atan(Math.sinh(Math.PI * (1 - 2 * y / TILE))) * 180 / Math.PI];
+}
+const mpu = lat => EARTH_M * Math.cos(lat * Math.PI / 180) / TILE;   // ground metres per unit
+// Corners (Leaflet [lat, lon]) of a rectangle centred at (cx, cy) with half-length a along
+// unit vector (ux, uy) and half-width b across it. Same order as core.corridor_geometry.
+function rectCorners(cx, cy, ux, uy, a, b) {
+  const nx = -uy, ny = ux;
+  return [[1, 1], [1, -1], [-1, -1], [-1, 1]].map(([sa, sb]) => {
+    const [lon, lat] = toLonLat(cx + sa * a * ux + sb * b * nx, cy + sa * a * uy + sb * b * ny);
+    return [lat, lon];
+  });
+}
+
 // --- Base map -------------------------------------------------------------
 const map = L.map('map').setView([36.5, -119.5], 6);
 const osm = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',
@@ -146,36 +198,131 @@ const esri = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/W
   { maxZoom: 19, attribution: 'Esri World Imagery (current)' });
 L.control.layers({ 'OpenStreetMap': osm, 'Esri imagery (current)': esri }).addTo(map);
 
-// --- Rectangle drawing -> bbox fields -------------------------------------
-const drawn = new L.FeatureGroup().addTo(map);
+// --- Rotatable bounding box -----------------------------------------------
+// rbox = { centre: [lat, lon], lengthM (along `bearing`), widthM (across it), bearing (deg, 0 = north) }.
+// The W/S/E/N inputs hold the box as it would be at bearing 90 (unrotated, length east-west);
+// bbox_angle is the clockwise rotation from there. This matches corridor_from_rotated_bbox() in core.py.
 map.addControl(new L.Control.Draw({
   draw: { polygon: false, polyline: false, circle: false, marker: false, circlemarker: false,
           rectangle: { shapeOptions: { color: '#e6a100', weight: 2 } } },
-  edit: { featureGroup: drawn, remove: true }
+  edit: false
 }));
-let rect = null, drawing = false;
+let drawing = false;
 map.on('draw:drawstart', () => drawing = true);
 map.on('draw:drawstop', () => drawing = false);
 
-function setBBoxInputs(b) {
-  $('west').value = fmt(b.getWest()); $('east').value = fmt(b.getEast());
-  $('south').value = fmt(b.getSouth()); $('north').value = fmt(b.getNorth());
-}
-function drawRect(bounds) {
-  if (rect) drawn.removeLayer(rect);
-  rect = L.rectangle(bounds, { color: '#e6a100', weight: 2 });
-  drawn.addLayer(rect);
-}
-map.on(L.Draw.Event.CREATED, e => { drawRect(e.layer.getBounds()); setBBoxInputs(rect.getBounds()); $('mode-bbox').checked = true; });
-map.on(L.Draw.Event.EDITED, e => e.layers.eachLayer(l => { if (l === rect) setBBoxInputs(l.getBounds()); }));
-map.on(L.Draw.Event.DELETED, e => e.layers.eachLayer(l => { if (l === rect) rect = null; }));
+let rbox = null;
+const ui = { layer: null, poly: null, rotate: null, corners: [] };
+const icon = (cls, html = '') => L.divIcon({ className: cls, html, iconSize: cls === 'rbox-rotate' ? [22, 22] : [10, 10] });
 
-// Typing into the bbox fields updates the rectangle on the map.
-['west', 'south', 'east', 'north'].forEach(id => $(id).addEventListener('change', () => {
+// Direction vector (y down) of the box's long axis for a compass bearing.
+const axis = bearing => { const t = bearing * Math.PI / 180; return [Math.sin(t), -Math.cos(t)]; };
+
+function boxFromInputs() {
   const w = parseFloat($('west').value), s = parseFloat($('south').value),
         e = parseFloat($('east').value), n = parseFloat($('north').value);
-  if ([w, s, e, n].every(Number.isFinite)) drawRect([[s, w], [n, e]]);
-}));
+  if (![w, s, e, n].every(Number.isFinite) || w >= e || s >= n) return null;
+  const [x0, y0] = toPx(w, n), [x1, y1] = toPx(e, s);
+  const [lon, lat] = toLonLat((x0 + x1) / 2, (y0 + y1) / 2);
+  const m = mpu(lat), angle = parseFloat($('bbox_angle').value) || 0;
+  return { centre: [lat, lon], lengthM: (x1 - x0) * m, widthM: (y1 - y0) * m,
+           bearing: ((90 + angle) % 360 + 360) % 360 };
+}
+
+function boxToInputs(box) {
+  const [lat, lon] = box.centre, [cx, cy] = toPx(lon, lat), m = mpu(lat);
+  const hx = box.lengthM / 2 / m, hy = box.widthM / 2 / m;
+  const [w, n] = toLonLat(cx - hx, cy - hy), [e, s] = toLonLat(cx + hx, cy + hy);
+  $('west').value = fmt(w); $('east').value = fmt(e); $('south').value = fmt(s); $('north').value = fmt(n);
+  $('bbox_angle').value = (((box.bearing - 90) % 360 + 540) % 360 - 180).toFixed(1);   // -180..180
+}
+
+// Corner LatLngs plus the rotate-handle position, 30 screen px past the "end" side.
+function boxLayout(box) {
+  const [lat, lon] = box.centre, [cx, cy] = toPx(lon, lat), m = mpu(lat);
+  const [ux, uy] = axis(box.bearing), a = box.lengthM / 2 / m, b = box.widthM / 2 / m;
+  const off = 30 / 2 ** map.getZoom();
+  const [rlon, rlat] = toLonLat(cx + ux * (a + off), cy + uy * (a + off));
+  return { corners: rectCorners(cx, cy, ux, uy, a, b), rotate: [rlat, rlon] };
+}
+
+function updateBoxLayers(skip = null) {
+  const { corners, rotate } = boxLayout(rbox);
+  ui.poly.setLatLngs(corners);
+  corners.forEach((ll, i) => { if (ui.corners[i] !== skip) ui.corners[i].setLatLng(ll); });
+  if (ui.rotate !== skip) ui.rotate.setLatLng(rotate);
+}
+
+function drawBox(box) {
+  if (ui.layer) { map.removeLayer(ui.layer); ui.layer = null; }
+  rbox = box;
+  if (!box) return;
+  const { corners, rotate } = boxLayout(box);
+  const layer = ui.layer = L.layerGroup().addTo(map);
+  ui.poly = L.polygon(corners, { color: '#e6a100', weight: 2, fillOpacity: 0.08, className: 'rbox-body' }).addTo(layer);
+
+  // Rotate: drag the handle around the centre (Shift snaps to 5 degrees).
+  ui.rotate = L.marker(rotate, { draggable: true, icon: icon('rbox-rotate', '\u21bb'), title: 'Drag to rotate' }).addTo(layer);
+  ui.rotate.on('drag', e => {
+    const [lat, lon] = rbox.centre, [cx, cy] = toPx(lon, lat);
+    const ll = e.target.getLatLng(), [px, py] = toPx(ll.lng, ll.lat);
+    let b = (Math.atan2(px - cx, -(py - cy)) * 180 / Math.PI + 360) % 360;
+    if (e.originalEvent && e.originalEvent.shiftKey) b = Math.round(b / 5) * 5;
+    rbox.bearing = b;
+    updateBoxLayers(e.target);
+  }).on('dragend', () => { updateBoxLayers(); boxToInputs(rbox); });
+
+  // Resize: drag a corner; centre and rotation are kept.
+  ui.corners = corners.map(ll => L.marker(ll, { draggable: true, icon: icon('rbox-corner'), title: 'Drag to resize' }).addTo(layer));
+  ui.corners.forEach(mk => mk.on('drag', e => {
+    const [lat, lon] = rbox.centre, [cx, cy] = toPx(lon, lat), m = mpu(lat);
+    const ll = e.target.getLatLng(), [px, py] = toPx(ll.lng, ll.lat);
+    const [ux, uy] = axis(rbox.bearing), rx = px - cx, ry = py - cy;
+    rbox.lengthM = Math.max(1, 2 * Math.abs(rx * ux + ry * uy) * m);
+    rbox.widthM = Math.max(1, 2 * Math.abs(-rx * uy + ry * ux) * m);
+    updateBoxLayers(e.target);
+  }).on('dragend', () => { updateBoxLayers(); boxToInputs(rbox); }));
+
+  // Move: drag the polygon body.
+  ui.poly.on('mousedown', e => {
+    if (!$('mode-bbox').checked) return;
+    map.dragging.disable();
+    moveFrom = toPx(e.latlng.lng, e.latlng.lat);
+    centreFrom = toPx(rbox.centre[1], rbox.centre[0]);
+    L.DomEvent.stop(e);
+  });
+}
+
+let moveFrom = null, centreFrom = null;
+map.on('mousemove', e => {
+  if (!moveFrom) return;
+  const p = toPx(e.latlng.lng, e.latlng.lat);
+  const [lon, lat] = toLonLat(centreFrom[0] + p[0] - moveFrom[0], centreFrom[1] + p[1] - moveFrom[1]);
+  rbox.centre = [lat, lon];
+  updateBoxLayers();
+});
+map.on('mouseup', () => { if (moveFrom) { moveFrom = null; map.dragging.enable(); boxToInputs(rbox); } });
+map.on('zoomend', () => { if (rbox) updateBoxLayers(); });
+
+// New rectangle from the draw tool -> unrotated box.
+map.on(L.Draw.Event.CREATED, e => {
+  const b = e.layer.getBounds();
+  $('west').value = fmt(b.getWest()); $('east').value = fmt(b.getEast());
+  $('south').value = fmt(b.getSouth()); $('north').value = fmt(b.getNorth());
+  $('bbox_angle').value = 0;
+  $('mode-bbox').checked = true;
+  drawBox(boxFromInputs());
+});
+
+// Typing into the fields (or restoring them after a submit) rebuilds the box.
+['west', 'south', 'east', 'north', 'bbox_angle'].forEach(id =>
+  $(id).addEventListener('change', () => drawBox(boxFromInputs())));
+
+$('clear-box').addEventListener('click', () => {
+  drawBox(null);
+  ['west', 'south', 'east', 'north'].forEach(id => $(id).value = '');
+  $('bbox_angle').value = 0;
+});
 
 // --- Segment clicks -> start/end fields ------------------------------------
 const markers = { start: null, end: null };
@@ -185,6 +332,7 @@ function setPoint(which, latlng) {
   if (markers[which]) map.removeLayer(markers[which]);
   markers[which] = L.circleMarker(latlng, { radius: 7, color: which === 'start' ? '#2a9d3f' : '#d62828', weight: 3 })
     .bindTooltip(which, { permanent: true, direction: 'top' }).addTo(map);
+  updateCorridorPreview();
 }
 map.on('click', e => {
   if (drawing || !$('mode-segment').checked) return;
@@ -197,13 +345,39 @@ map.on('click', e => {
     if (Number.isFinite(lat) && Number.isFinite(lon)) setPoint(which, L.latLng(lat, lon));
   })));
 
+// Live outline of the aligned corridor (segment mode + "Align to segment").
+let corridorPreview = null;
+function updateCorridorPreview() {
+  if (corridorPreview) { map.removeLayer(corridorPreview); corridorPreview = null; }
+  if (!$('aligned').checked || !$('mode-segment').checked) return;
+  const lat1 = parseFloat($('start_lat').value), lon1 = parseFloat($('start_lon').value),
+        lat2 = parseFloat($('end_lat').value), lon2 = parseFloat($('end_lon').value);
+  if (![lat1, lon1, lat2, lon2].every(Number.isFinite)) return;
+  const [x1, y1] = toPx(lon1, lat1), [x2, y2] = toPx(lon2, lat2);
+  const dx = x2 - x1, dy = y2 - y1, len = Math.hypot(dx, dy);
+  if (!len) return;
+  const m = mpu((lat1 + lat2) / 2);
+  const hw = parseFloat($('half_width_m').value) || 20, pad = parseFloat($('pad_m').value) || 0;
+  const corners = rectCorners((x1 + x2) / 2, (y1 + y2) / 2, dx / len, dy / len, len / 2 + pad / m, hw / m);
+  corridorPreview = L.polygon(corners, { color: '#e6a100', weight: 2, fillOpacity: 0.08 }).addTo(map);
+}
+['aligned', 'half_width_m', 'pad_m', 'mode-segment', 'mode-bbox']
+  .forEach(id => $(id).addEventListener('change', updateCorridorPreview));
+
 // --- Restore map state from previous submission ---------------------------
 ['start', 'end'].forEach(which => $(which + '_lat').dispatchEvent(new Event('change')));
 $('west').dispatchEvent(new Event('change'));
+updateCorridorPreview();
 if (RESULT && RESULT.bbox) {
-  const [w, s, e, n] = RESULT.bbox;
-  const fp = L.rectangle([[s, w], [n, e]], { color: '#1a5fb4', weight: 2, fill: false, dashArray: '6 4' }).addTo(map);
+  const style = { color: '#1a5fb4', weight: 2, fill: false, dashArray: '6 4' };
+  const fp = RESULT.corners
+    ? L.polygon(RESULT.corners.map(([lon, lat]) => [lat, lon]), style).addTo(map)
+    : L.rectangle([[RESULT.bbox[1], RESULT.bbox[0]], [RESULT.bbox[3], RESULT.bbox[2]]], style).addTo(map);
   map.fitBounds(fp.getBounds().pad(0.2));
+} else if (rbox) {
+  map.fitBounds(ui.poly.getBounds().pad(0.3));
+} else if (markers.start) {
+  map.setView(markers.start.getLatLng(), 15);
 }
 
 // --- Capture-date listing -------------------------------------------------

@@ -1,146 +1,173 @@
 <!doctype html>
 <html lang="en">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Wayback historical imagery</title>
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
-<link rel="stylesheet" href="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.css">
-<style>
-  body { font-family: system-ui, sans-serif; margin: 1.5rem; color: #222; }
-  .layout { display: grid; grid-template-columns: 400px 1fr; gap: 1.5rem; align-items: start; }
-  @media (max-width: 900px) { .layout { grid-template-columns: 1fr; } }
-  #map { height: 560px; border: 1px solid #ccc; }
-  form label { display: block; margin: .4rem 0 .1rem; font-size: .9rem; }
-  form input[type=text], form input[type=number], form input[type=date], form select {
-    width: 100%; box-sizing: border-box; padding: .3rem; }
-  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: .4rem; }
-  fieldset { border: 1px solid #ccc; margin: .8rem 0; padding: .5rem .8rem; }
-  .radio { display: flex; gap: .4rem; align-items: center; margin-top: .6rem; font-weight: 600; }
-  button { display: inline-block; margin-top: .6rem; padding: .5rem 1rem; background: #1a5fb4;
-    color: #fff; border: 0; border-radius: 4px; cursor: pointer; }
-  button.secondary { background: #666; }
-  button:disabled { background: #aaa; cursor: default; }
-  .hint { font-size: .8rem; color: #555; }
-  .error { color: #b00020; background: #fde8ea; padding: .6rem; border-radius: 4px; }
-  .warn { color: #7a4b00; background: #fff3d6; padding: .4rem .6rem; border-radius: 4px; }
-  #status { font-size: .85rem; color: #333; min-height: 1.2em; margin-top: .5rem; }
-  #result-image canvas { border: 1px solid #ccc; margin-top: .5rem; }
-  .meta { font-size: .85rem; color: #444; }
-  table.caps { border-collapse: collapse; font-size: .85rem; margin-top: .5rem; width: 100%; }
-  table.caps td, table.caps th { border: 1px solid #ddd; padding: .2rem .4rem; text-align: left; }
-  table.caps button { margin: 0; padding: .1rem .5rem; font-size: .8rem; }
-  footer { margin-top: 2rem; font-size: .8rem; color: #555; }
-</style>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Wayback historical imagery</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.css">
+    <style>
+        body { font-family: system-ui, sans-serif; margin: 1.5rem; color: #222; }
+        .layout { display: grid; grid-template-columns: 400px 1fr; gap: 1.5rem; align-items: start; }
+        @media (max-width: 900px) { .layout { grid-template-columns: 1fr; } }
+        #map { height: 560px; border: 1px solid #ccc; }
+        form label { display: block; margin: .4rem 0 .1rem; font-size: .9rem; }
+        form input[type=text], form input[type=number], form input[type=date], form select {
+            width: 100%; box-sizing: border-box; padding: .3rem; }
+        .grid { display: grid; grid-template-columns: 1fr 1fr; gap: .4rem; }
+        fieldset { border: 1px solid #ccc; margin: .8rem 0; padding: .5rem .8rem; }
+        .radio { display: flex; gap: .4rem; align-items: center; margin-top: .6rem; font-weight: 600; }
+        button { display: inline-block; margin-top: .6rem; padding: .5rem 1rem; background: #1a5fb4;
+            color: #fff; border: 0; border-radius: 4px; cursor: pointer; }
+        button.secondary { background: #666; }
+        button:disabled { background: #aaa; cursor: default; }
+        .hint { font-size: .8rem; color: #555; }
+        .error { color: #b00020; background: #fde8ea; padding: .6rem; border-radius: 4px; }
+        .warn { color: #7a4b00; background: #fff3d6; padding: .4rem .6rem; border-radius: 4px; }
+        #status { font-size: .85rem; color: #333; min-height: 1.2em; margin-top: .5rem; }
+        #result-image canvas { border: 1px solid #ccc; margin-top: .5rem; }
+        .meta { font-size: .85rem; color: #444; }
+        table.caps { border-collapse: collapse; font-size: .85rem; margin-top: .5rem; width: 100%; }
+        table.caps td, table.caps th { border: 1px solid #ddd; padding: .2rem .4rem; text-align: left; }
+        table.caps button { margin: 0; padding: .1rem .5rem; font-size: .8rem; }
+        footer { margin-top: 2rem; font-size: .8rem; color: #555; }
+
+        /* Rotatable bounding box handles (see drawBox() in app.js) */
+        .rbox-body { cursor: move; }
+        .rbox-rotate { background: #fff; border: 2px solid #e6a100; border-radius: 50%;
+            box-shadow: 0 0 3px rgba(0,0,0,.6); text-align: center; line-height: 18px;
+            font-size: 14px; font-weight: bold; color: #e6a100; cursor: grab; }
+        .rbox-corner { background: #e6a100; border: 1px solid #fff; border-radius: 2px;
+            box-shadow: 0 0 3px rgba(0,0,0,.6); cursor: nwse-resize; }
+    </style>
 </head>
 <body>
 
 <h1>Historical imagery (Esri World Imagery Wayback)</h1>
 <p class="hint">
-  Runs entirely in your browser; imagery and metadata are fetched directly from Esri.
-  Selects by the date the photo was captured, not when the Wayback snapshot was published.
-  Command-line version and source: <a href="https://github.com/erbarwick/wayback-imagery">GitHub</a>.
+    Runs entirely in your browser; imagery and metadata are fetched directly from Esri.
+    Selects by the date the photo was captured, not when the Wayback snapshot was published.
+    Command-line version and source: <a href="https://github.com/erbarwick/wayback-imagery">GitHub</a>.
 </p>
 
 <div class="layout">
-  <form id="form">
-    <label for="label">Label (caption and filename)</label>
-    <input type="text" id="label" name="label" placeholder="e.g. SR-1 PM 10.2-10.8">
+    <form id="form">
+        <label for="label">Label (caption and filename)</label>
+        <input type="text" id="label" name="label" placeholder="e.g. SR-1 PM 10.2-10.8">
 
-    <label for="date">Date</label>
-    <input type="date" id="date" name="date" required>
+        <label for="date">Date</label>
+        <input type="date" id="date" name="date" required>
 
-    <div class="grid">
-      <div>
-        <label for="select_by">Match date against</label>
-        <select id="select_by" name="select_by">
-          <option value="capture">Capture date (photo taken)</option>
-          <option value="release">Release date (snapshot published)</option>
-        </select>
-      </div>
-      <div>
-        <label for="mode">Rule</label>
-        <select id="mode" name="mode">
-          <option value="nearest">Nearest</option>
-          <option value="before">Latest on/before</option>
-          <option value="after">Earliest on/after</option>
-        </select>
-      </div>
-    </div>
+        <div class="grid">
+            <div>
+                <label for="select_by">Match date against</label>
+                <select id="select_by" name="select_by">
+                    <option value="capture">Capture date (photo taken)</option>
+                    <option value="release">Release date (snapshot published)</option>
+                </select>
+            </div>
+            <div>
+                <label for="mode">Rule</label>
+                <select id="mode" name="mode">
+                    <option value="nearest">Nearest</option>
+                    <option value="before">Latest on/before</option>
+                    <option value="after">Earliest on/after</option>
+                </select>
+            </div>
+        </div>
 
-    <label for="release_id">Release ID override (optional; filled by "Use" below)</label>
-    <input type="number" id="release_id" name="release_id">
+        <label for="release_id">Release ID override (optional; filled by "Use" below)</label>
+        <input type="number" id="release_id" name="release_id">
 
-    <fieldset>
-      <legend>Area of interest</legend>
-      <label class="radio">
-        <input type="radio" name="area_mode" value="segment" id="mode-segment" checked>
-        Road segment (start / end points)
-      </label>
-      <div class="grid">
-        <div><label for="start_lat">Start lat</label><input type="number" step="any" id="start_lat" name="start_lat"></div>
-        <div><label for="start_lon">Start lon</label><input type="number" step="any" id="start_lon" name="start_lon"></div>
-        <div><label for="end_lat">End lat</label><input type="number" step="any" id="end_lat" name="end_lat"></div>
-        <div><label for="end_lon">End lon</label><input type="number" step="any" id="end_lon" name="end_lon"></div>
-        <div><label for="margin_m">Min. margin (m)</label><input type="number" step="any" id="margin_m" name="margin_m" value="150"></div>
-        <div><label>&nbsp;</label><label><input type="checkbox" id="markers" name="markers" checked> Draw endpoint markers</label></div>
-      </div>
+        <fieldset>
+            <legend>Area of interest</legend>
+            <label class="radio">
+                <input type="radio" name="area_mode" value="segment" id="mode-segment" checked>
+                Road segment (start / end points)
+            </label>
+            <div class="grid">
+                <div><label for="start_lat">Start lat</label><input type="number" step="any" id="start_lat" name="start_lat"></div>
+                <div><label for="start_lon">Start lon</label><input type="number" step="any" id="start_lon" name="start_lon"></div>
+                <div><label for="end_lat">End lat</label><input type="number" step="any" id="end_lat" name="end_lat"></div>
+                <div><label for="end_lon">End lon</label><input type="number" step="any" id="end_lon" name="end_lon"></div>
+                <div><label for="margin_m">Min. margin (m)</label><input type="number" step="any" id="margin_m" name="margin_m" value="150"></div>
+                <div><label>&nbsp;</label><label><input type="checkbox" id="markers" name="markers" checked> Draw endpoint markers</label></div>
+                <div style="grid-column: 1 / -1"><label><input type="checkbox" id="aligned" name="aligned"> Align to segment
+                    (narrow corridor, rotated so the road runs left to right)</label></div>
+                <div><label for="half_width_m">Corridor half-width (m)</label>
+                    <input type="number" step="any" min="2" id="half_width_m" name="half_width_m" value="20"></div>
+                <div><label for="pad_m">Padding past ends (m)</label>
+                    <input type="number" step="any" min="0" id="pad_m" name="pad_m" value="30"></div>
+            </div>
 
-      <label class="radio">
-        <input type="radio" name="area_mode" value="bbox" id="mode-bbox">
-        Bounding box
-      </label>
-      <div class="grid">
-        <div><label for="west">West</label><input type="number" step="any" id="west" name="west"></div>
-        <div><label for="east">East</label><input type="number" step="any" id="east" name="east"></div>
-        <div><label for="south">South</label><input type="number" step="any" id="south" name="south"></div>
-        <div><label for="north">North</label><input type="number" step="any" id="north" name="north"></div>
-      </div>
-    </fieldset>
+            <label class="radio">
+                <input type="radio" name="area_mode" value="bbox" id="mode-bbox">
+                Bounding box (rotatable)
+            </label>
+            <div class="grid">
+                <div><label for="west">West</label><input type="number" step="any" id="west" name="west"></div>
+                <div><label for="east">East</label><input type="number" step="any" id="east" name="east"></div>
+                <div><label for="south">South</label><input type="number" step="any" id="south" name="south"></div>
+                <div><label for="north">North</label><input type="number" step="any" id="north" name="north"></div>
+                <div><label for="bbox_angle">Rotation (° clockwise)</label>
+                    <input type="number" step="any" id="bbox_angle" name="bbox_angle" value="0"></div>
+                <div><label>&nbsp;</label>
+                    <button type="button" class="secondary" id="clear-box" style="margin-top:0">Clear box</button></div>
+            </div>
+            <p class="hint" style="margin:.4rem 0 0">
+                West/South/East/North describe the box before rotation; rotation turns it about its centre.
+                On the map: drag ↻ to rotate (Shift snaps to 5°), corners to resize, the body to move.
+                The output is rotated so the box is upright, with the ↻ end on the right and a north arrow.
+            </p>
+        </fieldset>
 
-    <details>
-      <summary>Advanced</summary>
-      <div class="grid">
-        <div><label for="zoom">Zoom (blank = auto)</label><input type="number" id="zoom" name="zoom" min="1" max="23"></div>
-        <div><label for="max_px">Max output px</label><input type="number" id="max_px" name="max_px" value="4096"></div>
-      </div>
-    </details>
+        <details>
+            <summary>Advanced</summary>
+            <div class="grid">
+                <div><label for="zoom">Zoom (blank = auto)</label><input type="number" id="zoom" name="zoom" min="1" max="23"></div>
+                <div><label for="max_px">Max output px</label><input type="number" id="max_px" name="max_px" value="4096"></div>
+            </div>
+        </details>
 
-    <button type="submit">Fetch image</button>
-    <button type="button" class="secondary" id="list-captures">List capture dates for this area</button>
-    <div id="status"></div>
-    <div id="captures"></div>
+        <button type="submit">Fetch image</button>
+        <button type="button" class="secondary" id="list-captures">List capture dates for this area</button>
+        <div id="status"></div>
+        <div id="captures"></div>
 
-    <p class="hint">
-      Map: rectangle tool sets the bounding box; with "Road segment" selected, click twice to set start and end.
-      "List capture dates" scans all releases at the area center and shows each distinct photo once.
-    </p>
-  </form>
+        <p class="hint">
+            Map: the rectangle tool draws the bounding box, which can then be rotated, resized and moved.
+            With "Road segment" selected, click twice to set start and end.
+            "List capture dates" scans all releases at the area center and shows each distinct photo once.
+        </p>
+    </form>
 
-  <div id="map"></div>
+    <div id="map"></div>
 </div>
 
 <p id="error" class="error" hidden></p>
 
 <section id="result" hidden>
-  <h2>Result</h2>
-  <p class="meta">
-    File: <code id="result-filename"></code><br>
-    Captured: <strong id="result-captured"></strong> <span id="result-capture-extra"></span><br>
-    Selected by <span id="result-selection"></span>: Wayback release <span id="result-release"></span>
-    for requested date <span id="result-requested"></span><br>
-    Zoom <span id="result-zoom"></span>, <span id="result-size"></span> px,
-    <span id="result-tiles"></span> tiles missing
-  </p>
-  <p id="result-mixed" class="warn" hidden>
-    This area spans imagery from more than one date: <span id="result-mixed-dates"></span>.
-  </p>
-  <button type="button" id="download">Download</button>
-  <div id="result-image"></div>
+    <h2>Result</h2>
+    <p class="meta">
+        File: <code id="result-filename"></code><br>
+        Captured: <strong id="result-captured"></strong> <span id="result-capture-extra"></span><br>
+        Selected by <span id="result-selection"></span>: Wayback release <span id="result-release"></span>
+        for requested date <span id="result-requested"></span><br>
+        Zoom <span id="result-zoom"></span>, <span id="result-size"></span> px,
+        <span id="result-tiles"></span> tiles missing
+        <span id="result-aligned" hidden><br>Aligned corridor, bearing <span id="result-bearing"></span>°; north arrow marks north.</span>
+        <span id="result-rotated" hidden><br>Box rotated <span id="result-rotation"></span>° clockwise
+            (image top faces bearing <span id="result-rotation-bearing"></span>°); north arrow marks north.</span>
+    </p>
+    <p id="result-mixed" class="warn" hidden>
+        This area spans imagery from more than one date: <span id="result-mixed-dates"></span>.
+    </p>
+    <button type="button" id="download">Download</button>
+    <div id="result-image"></div>
 </section>
 
 <footer>
-  Imagery: Esri World Imagery Wayback, subject to Esri's terms of use. Basemap: OpenStreetMap contributors, Esri.
+    Imagery: Esri World Imagery Wayback, subject to Esri's terms of use. Basemap: OpenStreetMap contributors, Esri.
 </footer>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>

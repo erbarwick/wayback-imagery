@@ -23,6 +23,8 @@ from .core import (
     bbox_center,
     bbox_from_segment,
     choose_zoom,
+    corridor_from_rotated_bbox,
+    corridor_geometry,
     distinct_captures,
     generate_image,
     get_releases,
@@ -32,9 +34,7 @@ from .core import (
 
 OUTPUT_DIR = Path(os.environ.get("WAYBACK_OUTPUT_DIR", Path.cwd() / "output"))
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-
 app = Flask(__name__)
-
 
 def _float(form, key, required=True):
     """Parse a float form field; raise ValueError naming the field on failure."""
@@ -58,17 +58,25 @@ def _int(form, key, default=None):
     except ValueError:
         raise ValueError(f"'{key}' must be an integer (got '{raw}').")
 
-
 def _resolve_area(form):
-    """Return (bbox, marker_points) from either bbox fields or segment fields."""
+    """Return (bbox, marker_points, corridor) from either bbox fields or segment fields."""
     if form.get("area_mode", "segment") == "bbox":
-        return (_float(form, "west"), _float(form, "south"),
-                _float(form, "east"), _float(form, "north")), None
+        bbox = (_float(form, "west"), _float(form, "south"), _float(form, "east"), _float(form, "north"))
+        angle = _float(form, "bbox_angle", required=False) or 0.0
+        if abs(angle) < 0.05:
+            return bbox, None, None
+        geom = corridor_from_rotated_bbox(bbox, angle)
+        return geom.envelope, None, geom
     start = (_float(form, "start_lat"), _float(form, "start_lon"))
     end = (_float(form, "end_lat"), _float(form, "end_lon"))
+    points = [start, end] if form.get("markers") else None
+    if form.get("aligned"):
+        geom = corridor_geometry(start, end,
+                                 _float(form, "half_width_m", required=False) or 20.0,
+                                 _float(form, "pad_m", required=False) or 30.0)
+        return geom.envelope, points, geom
     margin = _float(form, "margin_m", required=False) or 150.0
-    bbox = bbox_from_segment(start, end, margin_m=margin)
-    return bbox, ([start, end] if form.get("markers") else None)
+    return bbox_from_segment(start, end, margin_m=margin), points, None
 
 
 @app.route("/", methods=["GET", "POST"])
@@ -77,7 +85,7 @@ def index():
     form = request.form if request.method == "POST" else {}
     if request.method == "POST":
         try:
-            bbox, points = _resolve_area(form)
+            bbox, points, corridor = _resolve_area(form)
             result = generate_image(
                 bbox=bbox,
                 date=dt.date.fromisoformat(form.get("date", "")),
@@ -89,6 +97,7 @@ def index():
                 select_by=form.get("select_by", "capture"),
                 release_id=_int(form, "release_id"),
                 points=points,
+                corridor=corridor,
             )
         except (ValueError, requests.RequestException) as exc:
             error = str(exc)
@@ -102,7 +111,7 @@ def api_captures():
     string (same field names as the form). Used by the "List capture dates" button.
     """
     try:
-        bbox, _ = _resolve_area(request.args)
+        bbox, _, _ = _resolve_area(request.args)
         bbox = validate_bbox(bbox)
         zoom = _int(request.args, "zoom") or choose_zoom(bbox, max_px=_int(request.args, "max_px", 4096))
         lon, lat = bbox_center(bbox)
